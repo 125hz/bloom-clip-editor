@@ -6,8 +6,8 @@ const fs = require("fs");
 const { spawn } = require("child_process");
 
 // Bundled binaries
-const ffmpegPath = require("ffmpeg-static");
-const ffprobePath = require("ffprobe-static").path;
+const ffmpegPath = require("ffmpeg-static").replace("app.asar", "app.asar.unpacked");
+const ffprobePath = require("ffprobe-static").path.replace("app.asar", "app.asar.unpacked");
 
 let mainWindow;
 

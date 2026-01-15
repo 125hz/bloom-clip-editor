@@ -29,7 +29,11 @@
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true
-    }
+    },
+    "asarUnpack": [
+        "**/node_modules/ffmpeg-static/**",
+        "**/node_modules/ffprobe-static/**"
+    ]
   },
   "devDependencies": {
     "electron": "^28.2.0",
