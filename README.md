@@ -10,8 +10,8 @@ Bloom Editor (name TBD) is a clip editing software built with Electron that allo
 - **Multi-track Audio Support:** Supports clips with multiple audio tracks (great for Shadowplay clips with separate mic audio layer)!
 - **Presets for Exporting**: Multiple presets including Discord preset (keeps file size under 10mb)!
 
-## Install (unavailable at the moment)
-Download the latest release on the Releases page and run the provided installer
+## Install
+Download the latest [Windows release (.exe)](https://github.com/125hz/bloom-clip-editor/releases/latest/download/bloom-editor-Windows-Installer-x64.exe)
 
 ## Manual Install & Running
 

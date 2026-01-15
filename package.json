@@ -12,7 +12,8 @@
   },
   "build": {
     "appId": "com.125hz.bloomclipeditor",
-    "productName": "Bloom Clip Editor",
+    "productName": "Bloom Editor",
+	"artifactName": "bloom-editor-Windows-Installer-x64.${ext}",
     "files": [
       "**/*",
       "!backup/**"
