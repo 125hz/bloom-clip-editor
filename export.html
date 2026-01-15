@@ -1,0 +1,520 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8" />
+    <title>Export Project</title>
+    <style>
+        :root {
+            --bg-color: #0f0f0f;
+            --card-bg: rgba(30, 30, 30, 0.6);
+            --card-border: rgba(255, 255, 255, 0.08);
+            --card-hover-bg: rgba(45, 45, 45, 0.8);
+            --card-hover-border: rgba(255, 255, 255, 0.15);
+            --accent-color: #0A84FF;
+            --text-main: #f5f5f7;
+            --text-sub: #86868b;
+        }
+
+        body {
+            margin: 0;
+            padding: 24px;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-main);
+            height: 100vh;
+            box-sizing: border-box;
+            display: flex;
+            flex-direction: column;
+            user-select: none;
+            overflow: hidden;
+        }
+
+        h2 {
+            margin: 0 0 20px 4px;
+            font-size: 20px;
+            font-weight: 600;
+            letter-spacing: -0.01em;
+            color: var(--text-main);
+        }
+
+        .grid {
+            display: grid;
+            grid-template-columns: 1fr;
+            gap: 10px;
+        }
+
+        /* --- Minimalist Cards (SHARP CORNERS) --- */
+        .card {
+            position: relative;
+            padding: 14px 18px;
+            background: var(--card-bg);
+            border: 1px solid var(--card-border);
+            border-radius: 0px;
+            /* REMOVED ROUNDED CORNERS */
+            cursor: pointer;
+            transition: background 0.15s ease, border-color 0.15s ease;
+            backdrop-filter: blur(10px);
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+        }
+
+        .card:hover {
+            background: var(--card-hover-bg);
+            border-color: var(--card-hover-border);
+        }
+
+        .card:active {
+            background: rgba(50, 50, 50, 0.9);
+        }
+
+        .card.disabled {
+            opacity: 0.4;
+            pointer-events: none;
+        }
+
+        .row-spread {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .preset-size {
+            font-family: 'SF Mono', monospace;
+            font-size: 11px;
+            color: var(--accent-color);
+            font-weight: 600;
+        }
+
+        .title {
+            font-size: 14px;
+            font-weight: 600;
+            margin-bottom: 4px;
+            color: #fff;
+        }
+
+        .desc {
+            color: var(--text-sub);
+            font-size: 12px;
+            font-weight: 400;
+        }
+
+        /* Custom Input Section */
+        #preset-custom {
+            cursor: default;
+        }
+
+        #preset-custom:hover {
+            background: var(--card-bg);
+            border-color: var(--card-border);
+        }
+
+        .inputs-row {
+            display: flex;
+            gap: 10px;
+            margin-top: 14px;
+            padding-top: 14px;
+            border-top: 1px solid rgba(255, 255, 255, 0.05);
+        }
+
+        .input-group {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            flex: 1;
+        }
+
+        .input-group label {
+            font-size: 10px;
+            font-weight: 600;
+            color: var(--text-sub);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        input[type="number"] {
+            width: 100%;
+            background: rgba(0, 0, 0, 0.3);
+            border: 1px solid var(--card-border);
+            color: white;
+            padding: 6px 8px;
+            border-radius: 0px;
+            /* SHARP CORNERS */
+            font-family: inherit;
+            font-size: 12px;
+            outline: none;
+            transition: border-color 0.15s;
+            box-sizing: border-box;
+        }
+
+        input[type="number"]:focus {
+            border-color: var(--accent-color);
+            background: rgba(0, 0, 0, 0.5);
+        }
+
+        /* Buttons */
+        .btnrow {
+            display: flex;
+            justify-content: flex-end;
+            gap: 10px;
+            margin-top: 16px;
+        }
+
+        button {
+            padding: 6px 16px;
+            border-radius: 0px;
+            /* SHARP CORNERS */
+            border: 1px solid var(--card-border);
+            background: rgba(255, 255, 255, 0.05);
+            color: var(--text-main);
+            font-size: 12px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: background 0.15s ease;
+        }
+
+        button:hover {
+            background: rgba(255, 255, 255, 0.1);
+        }
+
+        button.primary {
+            background: var(--accent-color);
+            border-color: transparent;
+            color: white;
+            font-weight: 600;
+        }
+
+        button.primary:hover {
+            background: #2090FF;
+        }
+
+        button.primary:active {
+            opacity: 0.9;
+        }
+
+        /* --- TAB STYLES --- */
+        .tabs-header {
+            display: flex;
+            gap: 20px;
+            margin-bottom: 20px;
+            border-bottom: 2px solid rgba(255,255,255,0.1);
+        }
+        
+        .tab-btn {
+            font-size: 14px;
+            font-weight: 600;
+            padding: 8px 12px;
+            cursor: pointer;
+            color: var(--text-sub);
+            position: relative;
+            bottom: -2px; /* Overlap border */
+            border-bottom: 2px solid transparent;
+            transition: all 0.2s;
+        }
+        
+        .tab-btn:hover {
+            color: var(--text-main);
+        }
+        
+        .tab-btn.active {
+            color: var(--accent-color);
+            border-bottom-color: var(--accent-color);
+        }
+        
+        .tab-content {
+            display: none;
+        }
+        
+        .tab-content.active {
+            display: block;
+            animation: fadeIn 0.2s ease;
+        }
+        
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(4px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        .custom-panel {
+            display: flex;
+            flex-direction: column;
+            gap: 24px;
+        }
+
+        .panel-section h3 {
+            font-size: 12px;
+            text-transform: uppercase;
+            color: var(--text-sub);
+            margin: 0 0 10px 0;
+            letter-spacing: 0.5px;
+        }
+
+        /* --- SLIDER STYLES --- */
+        .slider-container {
+            position: relative;
+            height: 40px;
+            display: flex;
+            align-items: center;
+        }
+
+        input[type=range] {
+            -webkit-appearance: none;
+            width: 100%;
+            background: transparent;
+        }
+
+        input[type=range]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            height: 16px;
+            width: 16px;
+            border-radius: 50%;
+            background: var(--text-main);
+            margin-top: -6px;
+            cursor: pointer;
+            box-shadow: 0 2px 6px rgba(0,0,0,0.4);
+        }
+        
+        input[type=range]::-webkit-slider-runnable-track {
+            width: 100%;
+            height: 4px;
+            cursor: pointer;
+            background: rgba(255,255,255,0.2);
+            border-radius: 2px;
+        }
+
+        .slider-labels {
+            position: absolute;
+            bottom: -5px;
+            left: 0; 
+            right: 0; /* Align to track width */
+            /* Removed flex to allow absolute positioning of children */
+            height: 12px;
+            pointer-events: none;
+        }
+        
+        .slider-labels span {
+            position: absolute;
+            transform: translateX(-50%);
+            font-size: 10px;
+            color: var(--text-sub);
+        }
+        
+        /* Specific adjustments for edges */
+        .slider-labels span:first-child {
+            transform: translateX(0); /* Left align first */
+        }
+        .slider-labels span:last-child {
+            transform: translateX(-100%); /* Right align last */
+        }
+
+        .slider-value-display {
+            text-align: right;
+            font-size: 12px;
+            color: var(--text-main);
+            font-weight: 500;
+            margin-top: 5px;
+            display: flex;
+            align-items: center;
+            justify-content: flex-end;
+            gap: 4px;
+        }
+        
+        #target-mb-input {
+            background: transparent;
+            border: none;
+            border-bottom: 1px solid rgba(255,255,255,0.2);
+            color: var(--accent-color);
+            font-weight: 700;
+            font-family: inherit;
+            font-size: inherit;
+            width: 60px;
+            text-align: right;
+            padding: 0;
+            outline: none;
+        }
+        
+        #target-mb-input:focus {
+            border-bottom-color: var(--accent-color);
+        }
+        
+        /* Remove arrows from number input */
+        #target-mb-input::-webkit-inner-spin-button, 
+        #target-mb-input::-webkit-outer-spin-button { 
+            -webkit-appearance: none; 
+            margin: 0; 
+        }
+        
+        /* --- FOOTER & STATS --- */
+        .footer-stats {
+            margin-top: 30px;
+            padding-top: 15px;
+            border-top: 1px solid rgba(255,255,255,0.1);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        .stat-item {
+            display: flex;
+            flex-direction: column;
+        }
+        
+        .stat-item .label {
+            font-size: 10px;
+            color: var(--text-sub);
+            text-transform: uppercase;
+        }
+        
+        .stat-item .value {
+            font-size: 16px;
+            font-weight: 600;
+            color: var(--text-main);
+            font-family: 'SF Mono', monospace;
+        }
+
+        .cancel-global {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            padding: 4px 10px;
+            background: transparent;
+            border-color: transparent;
+            color: var(--text-sub);
+        }
+        .cancel-global:hover {
+            color: var(--text-main);
+            background: rgba(255,255,255,0.1);
+        }
+
+        .note {
+            margin-top: 20px;
+            font-size: 11px;
+            color: var(--text-sub);
+            text-align: center;
+            opacity: 0.6;
+        }
+    </style>
+
+</head>
+
+<body>
+    <h2>Select Format</h2>
+
+    <!-- TABS HEADER -->
+    <div class="tabs-header">
+        <div class="tab-btn active" data-tab="presets">Presets</div>
+        <div class="tab-btn" data-tab="custom">Custom</div>
+    </div>
+
+    <!-- START: PRESETS TAB -->
+    <div class="tab-content active" id="tab-presets">
+        <div class="grid">
+            <div class="card" id="preset-normal">
+            <div class="row-spread">
+                <div class="title">Normal</div>
+                <div class="preset-size">-- MB</div>
+            </div>
+            <div class="desc">1080p • 60 FPS • Standard Bitrate</div>
+        </div>
+
+        <div class="card" id="preset-smooth">
+            <div class="row-spread">
+                <div class="title">Smooth Motion</div>
+                <div class="preset-size">-- MB</div>
+            </div>
+            <div class="desc">1080p • 120 FPS • High Fluidity</div>
+        </div>
+
+        <div class="card" id="preset-hq">
+            <div class="row-spread">
+                <div class="title">High Fidelity</div>
+                <div class="preset-size">-- MB</div>
+            </div>
+            <div class="desc">1440p • 120 FPS • Lossless Audio</div>
+        </div>
+
+        <div class="card" id="preset-discord">
+            <div class="row-spread">
+                <div class="title">Discord</div>
+                <div class="preset-size">-- MB</div>
+            </div>
+            <div class="desc">720p • Optimized for &lt;10MB upload</div>
+        </div>
+        </div>
+        <div class="note">
+            "Smooth Motion" and "High Fidelity" require all source clips to be at least 120 FPS.
+        </div>
+    </div>
+
+    <!-- START: CUSTOM TAB -->
+    <div class="tab-content" id="tab-custom">
+        <div class="custom-panel">
+            <div class="panel-section">
+                <h3>Video Settings</h3>
+                <div class="inputs-row">
+                    <div class="input-group">
+                        <label for="cw">Width</label>
+                        <input id="cw" type="number" value="1920" min="16" step="2" title="Width">
+                    </div>
+                    <div class="input-group">
+                        <label for="ch">Height</label>
+                        <input id="ch" type="number" value="1080" min="16" step="2" title="Height">
+                    </div>
+                    <div class="input-group">
+                        <label for="cfps">FPS</label>
+                        <input id="cfps" type="number" value="60" min="1" step="1" title="FPS">
+                    </div>
+                </div>
+            </div>
+
+            <div class="panel-section">
+                <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 10px;">
+                    <h3 style="margin: 0;">File Size Limit</h3>
+                    <div style="display: flex; align-items: center; gap: 4px;">
+                        <input type="checkbox" id="limit-toggle" checked style="margin: 0; cursor: pointer;">
+                        <label for="limit-toggle" style="font-size: 11px; user-select: none; cursor: pointer; color: var(--text-sub);">Enable</label>
+                    </div>
+                </div>
+                <div id="limit-controls">
+                    <div class="slider-container">
+                    <input type="range" id="size-slider" min="0" max="100" step="0.1" value="0">
+                    <div class="slider-labels">
+                        <span style="left: 0%">5MB</span>
+                        <span style="left: 30.4%">25MB</span>
+                        <span style="left: 56.5%">100MB</span>
+                        <span style="left: 86.9%">500MB</span>
+                        <span style="left: 100%">1GB</span>
+                    </div>
+                </div>
+                <div class="slider-value-display">
+                    Target: <input id="target-mb-input" type="number" value="50" min="1" max="5000"> MB
+                </div>
+            </div>
+            </div>
+
+            <div class="btnrow">
+                <button class="primary" id="export-custom">Export File</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- FOOTER STATS -->
+    <div class="footer-stats">
+        <div class="stat-item">
+            <span class="label">Duration:</span>
+            <span class="value" id="duration-display">00:00</span>
+        </div>
+        <div class="stat-item">
+            <span class="label">Est. Size:</span>
+            <span class="value" id="est-size-display">-- MB</span>
+        </div>
+    </div>
+    
+    <!-- Cancel button is now global, outside tabs but maybe near footer -->
+    <button id="cancel" class="cancel-global">Cancel</button>
+
+    <script src="export_renderer.js"></script>
+</body>
+
+</html>

@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <title>Bloom Editor</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+
+<body>
+  <div id="loading-overlay">
+    <div class="spinner"></div>
+    <div class="loading-text">Importing...</div>
+  </div>
+
+  <div class="app-container">
+    <div class="top-bar">
+      <button id="btn-settings" class="menu-btn">Settings</button>
+      <button id="btn-help" class="menu-btn">Help</button>
+    </div>
+
+    <div class="preview-section" id="preview-section">
+      <div class="preview-media" id="preview-media">
+        <video id="video-a" preload="auto" playsinline style="z-index: 1; visibility: visible;"></video>
+        <video id="video-b" preload="auto" playsinline style="z-index: 0; visibility: hidden;"></video>
+        <canvas id="preview-canvas" style="z-index: 2; display: none;"></canvas>
+      </div>
+
+      <div class="controls-overlay">
+        <button id="play-pause-btn">&#9654;</button>
+        <button id="import-btn">Import</button>
+
+        <div id="time-display">0:00.00</div>
+
+        <div class="control-group">
+          <label for="preview-quality">Preview</label>
+          <select id="preview-quality">
+            <option value="1">Full</option>
+            <option value="0.75">75%</option>
+            <option value="0.5" selected>50%</option>
+            <option value="0.25">25%</option>
+          </select>
+        </div>
+
+        <button id="export-btn" class="primary-action">Export</button>
+
+      </div>
+    </div>
+
+    <!-- Restored missing overlay -->
+    <div id="no-clip-overlay">No clip under playhead</div>
+
+    <div class="timeline-wrapper">
+      <div class="timeline-ruler" id="timeline-ruler"></div>
+      <div class="tracks-area" id="tracks-area">
+        <div id="playhead"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- EXPORT PROGRESS OVERLAY (Moved to root to ensure full cover) -->
+  <div id="export-overlay" style="display: none;">
+      <div class="export-backdrop"></div>
+      <div class="export-modal">
+          <div class="export-preview-container">
+              <canvas id="export-preview-canvas" width="560" height="315"></canvas>
+          </div>
+          <div class="export-info">
+              <h3>Exporting Project...</h3>
+              <div class="progress-bar-container">
+                  <div id="export-progress-fill"></div>
+              </div>
+              <div class="export-stats-row">
+                  <span id="export-progress-pct">0%</span>
+                  <span id="export-frame-stats">Frame 0/0</span>
+                  <span id="export-time-stats">Remaining: --</span>
+              </div>
+              <button id="cancel-export-btn" class="btn-danger">Cancel</button>
+          </div>
+      </div>
+  </div>
+
+  <div id="settings-modal" class="modal-overlay">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3>Settings</h3>
+        <button id="close-settings" class="close-btn">×</button>
+      </div>
+      <div class="modal-body">
+        <div class="setting-item">
+          <label for="check-magnetic">Magnetic Snapping (Ripple Delete)</label>
+          <input type="checkbox" id="check-magnetic" checked>
+        </div>
+        <div class="setting-item">
+          <label for="check-pause-at-playhead">Pause at Playhead</label>
+          <input type="checkbox" id="check-pause-at-playhead">
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="help-modal" class="modal-overlay">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3>Keyboard Shortcuts</h3>
+        <button id="close-help" class="close-btn">×</button>
+      </div>
+      <div class="modal-body">
+        <ul class="shortcut-list">
+          <li><span>Play / Pause</span> <span>Space</span></li>
+          <li><span>Split Clip</span> <span>S</span></li>
+          <li><span>Highlight Left of Playhead</span> <span>Q</span></li>
+          <li><span>Highlight Right of Playhead</span> <span>E</span></li>
+          <li><span>Delete Clip</span> <span>Del, Backspace, D</span></li>
+          <li><span>Seek Frame</span> <span>Left / Right Arrows</span></li>
+          <li><span>Zoom Timeline</span> <span>Scroll Wheel</span></li>
+          <li><span>Undo</span> <span>Ctrl + Z</span></li>
+          <li><span>Redo</span> <span>Ctrl + Y</span></li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
+  <svg style="display: none;">
+    <defs>
+      <filter id="liquid-glass-filter" x="-20%" y="-20%" width="140%" height="140%">
+        <feTurbulence type="fractalNoise" baseFrequency="0.015" numOctaves="3" result="noise" />
+        <feGaussianBlur in="noise" stdDeviation="35" result="blurredNoise" />
+        <feDisplacementMap in="SourceGraphic" in2="blurredNoise" scale="30" xChannelSelector="R" yChannelSelector="G" />
+        <feComposite operator="in" in2="SourceGraphic" />
+      </filter>
+    </defs>
+  </svg>
+
+  <script src="renderer/init.js"></script>
+    <script src="renderer/diagnostics.js"></script>
+    <script src="renderer/utils.js"></script>
+    <script src="renderer/webaudio_mix.js"></script>
+    <script src="renderer/preview_quality.js"></script>
+    <script src="renderer/route_preview.js"></script>
+    <script src="renderer/waveform_decoding.js"></script>
+    <script src="renderer/timeline_rendering.js"></script>
+    <script src="renderer/snapping.js"></script>
+    <script src="renderer/drag_trim.js"></script>
+    <script src="renderer/scrubbing.js"></script>
+    <script src="renderer/wheel.js"></script>
+    <script src="renderer/import.js"></script>
+    <script src="renderer/split_delete.js"></script>
+    <script src="renderer/menus_settings.js"></script>
+    <script src="renderer/playback_loop.js"></script>
+    <script src="renderer/keyboard.js"></script>
+    <script src="renderer/export.js"></script>
+</body>
+
+</html>
