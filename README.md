@@ -15,6 +15,9 @@ Download the latest release on the Releases page and run the provided installer
 
 ## Manual Install & Running
 
+### 0. Requirements
+Install Node.js: https://nodejs.org/
+
 ### 1. Clone the Repository
 ```bash
 git clone https://github.com/125hz/bloom-clip-editor.git
