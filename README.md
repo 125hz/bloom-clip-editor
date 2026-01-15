@@ -3,9 +3,10 @@
 Bloom Editor (name TBD) is a clip editing software built with Electron that allows the user to quickly cut and merge clips for uploading to social media (Twitter, Youtube, and Discord primarily).
 
 ![App Screenshot](screenshot.png)
+[![Downloads](https://img.shields.io/github/downloads/125hz/bloom-clip-editor/total?label=Downloads)](https://github.com/125hz/bloom-clip-editor/releases/latest)
 
 ## Features
-- **Efficient Editing:** Easily split and delete clips with shortcuts.
+- **Efficient Editing:** Easily split and delete clips with shortcuts (view all shortcuts in the "Help" menu).
 - **Multiple Clip Support:** Allows you to combine multiple clips together.
 - **Multi-track Audio Support:** Supports clips with multiple audio tracks (great for Shadowplay clips with separate mic audio layer)!
 - **Presets for Exporting**: Multiple presets including Discord preset (keeps file size under 10mb)!
