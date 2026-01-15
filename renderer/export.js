@@ -136,6 +136,12 @@ if (myExportBtn) {
           if (!outPath) return;
 
           // Reset UI
+          if (typeof stopPlayback === 'function') stopPlayback();
+          if (typeof stopPreviewMix === 'function') stopPreviewMix();
+          
+          if (videoA) videoA.muted = true;
+          if (videoB) videoB.muted = true;
+
           const pm = document.getElementById("preview-media");
           if (pm) pm.style.opacity = "0"; // Hide main preview to avoid flickering/distraction
 
