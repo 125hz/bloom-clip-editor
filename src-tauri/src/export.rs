@@ -219,10 +219,31 @@ fn encode_settings(p: &ExportPayload, total: f64) -> EncodeSettings {
     s
 }
 
-/// Build the full filter graph. Returns (graph, video_out_label, audio_out_label).
+/// Per-clip ffmpeg input: (input index, input seek offset).
+/// Each media clip gets its own `-ss`-seeked input so ffmpeg never decodes
+/// from the start of the file to reach a trim point — this is what makes
+/// exports start instantly instead of hanging on "starting...".
+pub type ClipInputs = Vec<Option<(usize, f64)>>;
+
+pub fn plan_inputs(p: &ExportPayload) -> ClipInputs {
+    let mut out = Vec::with_capacity(p.clips.len());
+    let mut next = 1; // input 0 is the silent audio base
+    for c in &p.clips {
+        if c.kind == "video" || c.kind == "audio" {
+            let seek = (c.in_point - 1.0).max(0.0);
+            out.push(Some((next, seek)));
+            next += 1;
+        } else {
+            out.push(None);
+        }
+    }
+    out
+}
+
+/// Build the full filter graph.
 fn build_filter_graph(
     p: &ExportPayload,
-    input_index: &dyn Fn(&str) -> usize,
+    clip_inputs: &ClipInputs,
     total: f64,
     build_dir: &std::path::Path,
 ) -> Result<String, String> {
@@ -230,18 +251,23 @@ fn build_filter_graph(
     let mut g = String::new();
 
     // ---- video layers ----
-    let mut video_clips: Vec<&ExportClip> = p.clips.iter().filter(|c| c.kind == "video").collect();
-    video_clips.sort_by(|a, b| {
+    let mut video_clips: Vec<(usize, &ExportClip)> = p
+        .clips
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| c.kind == "video")
+        .collect();
+    video_clips.sort_by(|(_, a), (_, b)| {
         a.layer
             .cmp(&b.layer)
             .then(a.start_time.partial_cmp(&b.start_time).unwrap_or(std::cmp::Ordering::Equal))
     });
 
-    let mut layers: Vec<(i64, Vec<&ExportClip>)> = Vec::new();
-    for c in video_clips {
+    let mut layers: Vec<(i64, Vec<(usize, &ExportClip)>)> = Vec::new();
+    for (ci, c) in video_clips {
         match layers.last_mut() {
-            Some((l, v)) if *l == c.layer => v.push(c),
-            _ => layers.push((c.layer, vec![c])),
+            Some((l, v)) if *l == c.layer => v.push((ci, c)),
+            _ => layers.push((c.layer, vec![(ci, c)])),
         }
     }
 
@@ -252,7 +278,7 @@ fn build_filter_graph(
         let mut cursor = 0.0f64;
         let mut segments: Vec<String> = Vec::new();
 
-        for c in clips {
+        for (ci, c) in clips {
             let start = c.start_time.max(cursor);
             let gap = start - cursor;
             if gap > 0.01 {
@@ -267,7 +293,8 @@ fn build_filter_graph(
                 segments.push(label);
             }
 
-            let idx = input_index(&c.file_path);
+            let (idx, seek) = clip_inputs[*ci].ok_or("video clip without input")?;
+            let local_in = c.in_point - seek; // input is pre-seeked with -ss
             let crop = match &c.crop {
                 Some(r) if r.w < 0.999 || r.h < 0.999 => format!(
                     "crop=w=iw*{:.4}:h=ih*{:.4}:x=iw*{:.4}:y=ih*{:.4},",
@@ -282,8 +309,8 @@ fn build_filter_graph(
                 "[{idx}:v]trim=start={}:end={},setpts=PTS-STARTPTS,fps={fps},{crop}\
 scale={w}:{h}:force_original_aspect_ratio=decrease,\
 pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:color=black@0.0,setsar=1,format=yuva420p",
-                f(c.in_point),
-                f(c.in_point + c.duration)
+                f(local_in),
+                f(local_in + c.duration)
             );
             if c.opacity < 0.999 {
                 write!(chain, ",colorchannelmixer=aa={:.4}", c.opacity.clamp(0.0, 1.0)).unwrap();
@@ -444,17 +471,23 @@ x={cx}-text_w/2:y={line_cy}-text_h/2",
     // ---- audio ----
     let mut audio_labels: Vec<String> = Vec::new();
     let mut an = 0usize;
-    for c in p.clips.iter().filter(|c| c.kind == "video" || c.kind == "audio") {
+    for (ci, c) in p
+        .clips
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| c.kind == "video" || c.kind == "audio")
+    {
+        let Some((idx, seek)) = clip_inputs[ci] else { continue };
+        let local_in = c.in_point - seek;
         for tr in c.audio_tracks.iter().filter(|t| t.enabled) {
-            let idx = input_index(&c.file_path);
             let delay_ms = (c.start_time * 1000.0).round().max(0.0) as u64;
             let label = format!("au{an}");
             an += 1;
             let mut chain = format!(
                 "[{idx}:a:{}]atrim=start={}:end={},asetpts=PTS-STARTPTS,volume={:.4},aresample=48000:async=1",
                 tr.audio_order,
-                f(c.in_point),
-                f(c.in_point + c.duration),
+                f(local_in),
+                f(local_in + c.duration),
                 tr.volume.clamp(0.0, 4.0)
             );
             if c.fade_in > 0.001 {
@@ -536,11 +569,19 @@ mod tests {
             target_size_bytes: 0.0,
             crf: Some(23.0),
         };
-        let idx = |_: &str| 1usize;
+        let inputs = plan_inputs(&p);
         let dir = std::env::temp_dir().join("bloom-graph-test");
         std::fs::create_dir_all(&dir).unwrap();
-        let g = build_filter_graph(&p, &idx, 4.0, &dir).unwrap();
+        let g = build_filter_graph(&p, &inputs, 4.0, &dir).unwrap();
         std::fs::write(dir.join("filter.txt"), &g).unwrap();
+        let mut args = String::new();
+        for (c, input) in p.clips.iter().zip(&inputs) {
+            if let Some((_, seek)) = input {
+                let read_len = (c.in_point - seek) + c.duration + 2.0;
+                args.push_str(&format!("-ss {} -t {} -i {}\n", f(*seek), f(read_len), c.file_path));
+            }
+        }
+        std::fs::write(dir.join("inputs.txt"), &args).unwrap();
         println!("{g}");
     }
 }
@@ -586,19 +627,9 @@ fn run_export_inner(
     total: f64,
     build_dir: &std::path::Path,
 ) -> Result<(), String> {
-    // unique file inputs; input 0 is the silent audio base
-    let mut files: Vec<String> = Vec::new();
-    for c in &p.clips {
-        if (c.kind == "video" || c.kind == "audio") && !files.contains(&c.file_path) {
-            files.push(c.file_path.clone());
-        }
-    }
-    let files_for_lookup = files.clone();
-    let input_index = move |path: &str| -> usize {
-        files_for_lookup.iter().position(|f| f == path).map(|i| i + 1).unwrap_or(1)
-    };
-
-    let graph = build_filter_graph(p, &input_index, total, build_dir)?;
+    // one pre-seeked input per media clip; input 0 is the silent audio base
+    let clip_inputs = plan_inputs(p);
+    let graph = build_filter_graph(p, &clip_inputs, total, build_dir)?;
     let filter_path = build_dir.join("filter.txt");
     std::fs::write(&filter_path, &graph).map_err(|e| format!("filter file: {e}"))?;
 
@@ -616,8 +647,12 @@ fn run_export_inner(
         "-i",
         "anullsrc=channel_layout=stereo:sample_rate=48000",
     ]);
-    for file in &files {
-        cmd.args(["-i", file]);
+    for (c, input) in p.clips.iter().zip(&clip_inputs) {
+        let Some((_, seek)) = input else { continue };
+        // fast input seeking + bounded read: never decode more of the source
+        // than the clip actually uses
+        let read_len = (c.in_point - seek) + c.duration + 2.0;
+        cmd.args(["-ss", &f(*seek), "-t", &f(read_len), "-i", &c.file_path]);
     }
     cmd.args(["-filter_complex_script", "filter.txt"]);
     cmd.args(["-map", "[vout]", "-map", "[aout]"]);
