@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <title>bloom editor</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+
+<body>
+  <div id="app">
+    <header id="topbar">
+      <span id="app-title">bloom<span class="dim"> :: </span>editor</span>
+      <span class="spacer"></span>
+      <button class="tbtn" id="btn-settings">settings</button>
+      <button class="tbtn" id="btn-help">help</button>
+    </header>
+
+    <main id="stage">
+      <div id="preview-row">
+        <div id="preview-wrap">
+          <div id="preview-box">
+            <canvas id="preview-canvas"></canvas>
+            <div id="no-clip-overlay" hidden>no clip under playhead</div>
+            <div id="drop-hint" hidden>drop media to import</div>
+          </div>
+        </div>
+
+        <aside id="text-panel" hidden>
+          <div class="panel-title">text</div>
+          <label class="field">
+            <span>content</span>
+            <textarea id="txt-content" rows="3" spellcheck="false"></textarea>
+          </label>
+          <label class="field">
+            <span>font</span>
+            <select id="txt-font">
+              <option value="consolas">consolas</option>
+              <option value="arial">arial</option>
+              <option value="impact">impact</option>
+              <option value="segoe ui">segoe ui</option>
+              <option value="courier new">courier new</option>
+              <option value="times new roman">times new roman</option>
+              <option value="bahnschrift">bahnschrift</option>
+            </select>
+          </label>
+          <label class="field row">
+            <span>bold</span>
+            <input type="checkbox" id="txt-bold" />
+          </label>
+          <label class="field">
+            <span>size <em id="txt-size-val"></em></span>
+            <input type="range" id="txt-size" min="0.01" max="0.3" step="0.005" />
+          </label>
+          <label class="field row">
+            <span>color</span>
+            <input type="color" id="txt-color" />
+          </label>
+          <label class="field row">
+            <span>outline</span>
+            <input type="color" id="txt-outline-color" />
+          </label>
+          <label class="field">
+            <span>outline width <em id="txt-outline-val"></em></span>
+            <input type="range" id="txt-outline" min="0" max="0.02" step="0.001" />
+          </label>
+          <label class="field">
+            <span>x <em id="txt-x-val"></em></span>
+            <input type="range" id="txt-x" min="0" max="1" step="0.005" />
+          </label>
+          <label class="field">
+            <span>y <em id="txt-y-val"></em></span>
+            <input type="range" id="txt-y" min="0" max="1" step="0.005" />
+          </label>
+          <label class="field">
+            <span>fade in <em id="txt-fadein-val"></em></span>
+            <input type="range" id="txt-fadein" min="0" max="3" step="0.05" />
+          </label>
+          <label class="field">
+            <span>fade out <em id="txt-fadeout-val"></em></span>
+            <input type="range" id="txt-fadeout" min="0" max="3" step="0.05" />
+          </label>
+          <div class="panel-hint">drag text on the preview to position it</div>
+        </aside>
+
+        <aside id="clip-panel" hidden>
+          <div class="panel-title">video</div>
+          <label class="field">
+            <span>zoom <em id="crop-zoom-val"></em></span>
+            <input type="range" id="crop-zoom" min="1" max="4" step="0.05" />
+          </label>
+          <label class="field">
+            <span>pan x <em id="crop-x-val"></em></span>
+            <input type="range" id="crop-x" min="0" max="1" step="0.005" />
+          </label>
+          <label class="field">
+            <span>pan y <em id="crop-y-val"></em></span>
+            <input type="range" id="crop-y" min="0" max="1" step="0.005" />
+          </label>
+          <button class="tbtn small" id="crop-reset">reset</button>
+          <div class="panel-hint">drag the preview to pan when zoomed in</div>
+        </aside>
+      </div>
+
+      <div id="controls">
+        <button class="tbtn" id="play-btn">play</button>
+        <span id="time-display">0:00.00 / 0:00.00</span>
+        <button class="tbtn small" id="clear-loop-btn" hidden>clear loop</button>
+        <span class="spacer"></span>
+        <button class="tbtn" id="import-btn">import</button>
+        <button class="tbtn" id="add-text-btn">+ text</button>
+        <label class="ctl-select">preview
+          <select id="preview-quality">
+            <option value="1">full</option>
+            <option value="0.75" selected>75%</option>
+            <option value="0.5">50%</option>
+            <option value="0.25">25%</option>
+          </select>
+        </label>
+        <button class="tbtn primary" id="export-btn">export</button>
+      </div>
+
+      <div id="timeline">
+        <canvas id="ruler-canvas" height="26"></canvas>
+        <div id="tl-scroll">
+          <div id="tl-content">
+            <div id="loop-region" hidden>
+              <div class="loop-handle left"></div>
+              <div class="loop-handle right"></div>
+            </div>
+            <div id="ghost-playhead"></div>
+            <div id="playhead"></div>
+          </div>
+        </div>
+        <div id="track-actions">
+          <button class="tbtn small" id="add-video-track">+ video track</button>
+          <button class="tbtn small" id="add-audio-track">+ audio track</button>
+          <button class="tbtn small" id="add-text-track">+ text track</button>
+          <span class="spacer"></span>
+          <span id="status-line" class="dim"></span>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <!-- loading overlay -->
+  <div id="loading-overlay" class="overlay" hidden>
+    <div class="loading-box">
+      <pre class="dim" id="loading-spinner">|</pre>
+      <div id="loading-text">importing...</div>
+    </div>
+  </div>
+
+  <!-- export presets modal -->
+  <div id="export-modal" class="overlay" hidden>
+    <div class="modal">
+      <div class="modal-header">
+        <span>export</span>
+        <button class="tbtn small" id="export-close">x</button>
+      </div>
+      <div class="tabs">
+        <button class="tab active" data-tab="presets">presets</button>
+        <button class="tab" data-tab="custom">custom</button>
+      </div>
+
+      <div class="tab-page active" id="tab-presets">
+        <div class="preset" data-preset="discord">
+          <div class="preset-head"><span>discord</span><span class="preset-size" id="size-discord">9 MB</span></div>
+          <div class="dim">720p &middot; optimized for &lt;10mb upload</div>
+        </div>
+        <div class="preset" data-preset="normal">
+          <div class="preset-head"><span>normal</span><span class="preset-size" id="size-normal">-- MB</span></div>
+          <div class="dim">1080p &middot; 60 fps &middot; standard bitrate</div>
+        </div>
+        <div class="preset" data-preset="smooth">
+          <div class="preset-head"><span>smooth motion</span><span class="preset-size" id="size-smooth">-- MB</span></div>
+          <div class="dim">1080p &middot; 120 fps &middot; high fluidity</div>
+        </div>
+        <div class="preset" data-preset="hq">
+          <div class="preset-head"><span>high fidelity</span><span class="preset-size" id="size-hq">-- MB</span></div>
+          <div class="dim">1440p &middot; 120 fps &middot; high bitrate audio</div>
+        </div>
+        <div class="dim note">smooth motion / high fidelity need all source clips at 120 fps</div>
+      </div>
+
+      <div class="tab-page" id="tab-custom">
+        <div class="field-grid">
+          <label class="field"><span>width</span><input id="cw" type="number" value="1920" min="16" step="2"></label>
+          <label class="field"><span>height</span><input id="ch" type="number" value="1080" min="16" step="2"></label>
+          <label class="field"><span>fps</span><input id="cfps" type="number" value="60" min="1" step="1"></label>
+        </div>
+        <label class="field row" style="margin-top:12px">
+          <span>size limit</span>
+          <input type="checkbox" id="limit-toggle" checked>
+        </label>
+        <div id="limit-controls">
+          <input type="range" id="size-slider" min="0" max="100" step="0.1" value="35">
+          <div class="field row">
+            <span>target</span>
+            <span><input id="target-mb" type="number" value="50" min="1" max="5000" class="inline-num"> mb</span>
+          </div>
+        </div>
+        <div id="crf-controls" hidden>
+          <label class="field"><span>quality (crf) <em id="crf-val">18</em></span>
+            <input type="range" id="crf-slider" min="14" max="30" step="1" value="18">
+          </label>
+        </div>
+        <button class="tbtn primary" id="export-custom" style="margin-top:14px">export file</button>
+      </div>
+
+      <label class="field row" id="export-range-row" hidden>
+        <span>range</span>
+        <select id="export-range">
+          <option value="loop">loop region</option>
+          <option value="all">entire timeline</option>
+        </select>
+      </label>
+
+      <div class="modal-footer">
+        <span class="dim">duration <b id="export-duration">0:00</b></span>
+        <span class="dim">est. size <b id="export-est-size">--</b></span>
+      </div>
+    </div>
+  </div>
+
+  <!-- export progress overlay -->
+  <div id="progress-overlay" class="overlay" hidden>
+    <div class="modal">
+      <canvas id="export-preview-canvas" width="560" height="315"></canvas>
+      <div class="progress-track"><div id="export-fill"></div></div>
+      <div class="progress-stats">
+        <span id="export-pct">0%</span>
+        <span id="export-frames">frame 0 / 0</span>
+        <span id="export-eta">eta --:--</span>
+      </div>
+      <button class="tbtn" id="cancel-export">cancel</button>
+    </div>
+  </div>
+
+  <!-- settings modal -->
+  <div id="settings-modal" class="overlay" hidden>
+    <div class="modal">
+      <div class="modal-header"><span>settings</span><button class="tbtn small" id="settings-close">x</button></div>
+      <label class="field row"><span>magnetic snapping (ripple delete)</span><input type="checkbox" id="check-magnetic" checked></label>
+      <label class="field row"><span>snap to clips on other layers</span><input type="checkbox" id="check-layer-snap" checked></label>
+      <label class="field row"><span>pause at playhead</span><input type="checkbox" id="check-pause-at-playhead"></label>
+    </div>
+  </div>
+
+  <!-- help modal -->
+  <div id="help-modal" class="overlay" hidden>
+    <div class="modal">
+      <div class="modal-header"><span>keyboard shortcuts</span><button class="tbtn small" id="help-close">x</button></div>
+      <ul class="shortcut-list">
+        <li><span>play / pause</span><span>space</span></li>
+        <li><span>split clip</span><span>s</span></li>
+        <li><span>select left / right of playhead</span><span>q / e</span></li>
+        <li><span>delete clip</span><span>del, backspace, d</span></li>
+        <li><span>seek frame</span><span>left / right arrows</span></li>
+        <li><span>zoom timeline (on playhead)</span><span>scroll wheel</span></li>
+        <li><span>add text</span><span>t</span></li>
+        <li><span>export</span><span>ctrl + m</span></li>
+        <li><span>undo / redo</span><span>ctrl + z / ctrl + y</span></li>
+      </ul>
+    </div>
+  </div>
+
+  <script type="module" src="js/main.js"></script>
+</body>
+
+</html>

@@ -1,6 +1,11 @@
 # Dependencies
 node_modules/
 
+# Tauri
+src-tauri/target/
+src-tauri/gen/
+src-tauri/binaries/
+
 # Build output / packaged apps
 dist/
 out/
