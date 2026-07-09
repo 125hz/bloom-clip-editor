@@ -268,21 +268,27 @@ function buildClipEl(clip) {
   }
 
   if (clip.kind !== "text") {
-    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-    svg.setAttribute("class", "fade-svg");
-    svg.setAttribute("preserveAspectRatio", "none");
-    const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
-    path.setAttribute("class", "fade-line");
-    svg.appendChild(path);
-    el.appendChild(svg);
-
-    const fadeL = document.createElement("div");
-    fadeL.className = "fade-handle left";
-    const fadeR = document.createElement("div");
-    fadeR.className = "fade-handle right";
-    el.appendChild(fadeL);
-    el.appendChild(fadeR);
+    const speedTag = document.createElement("div");
+    speedTag.className = "speed-tag";
+    speedTag.hidden = true;
+    el.appendChild(speedTag);
   }
+
+  // all clip kinds (including text) get fade overlays + drag handles
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("class", "fade-svg");
+  svg.setAttribute("preserveAspectRatio", "none");
+  const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+  path.setAttribute("class", "fade-line");
+  svg.appendChild(path);
+  el.appendChild(svg);
+
+  const fadeL = document.createElement("div");
+  fadeL.className = "fade-handle left";
+  const fadeR = document.createElement("div");
+  fadeR.className = "fade-handle right";
+  el.appendChild(fadeL);
+  el.appendChild(fadeR);
 
   const hl = document.createElement("div");
   hl.className = "handle left";
@@ -344,8 +350,10 @@ function layoutWave(cnv, peaks, clip, clipWidthPx, heightPx) {
   cnv.style.left = `${winStart}px`;
   cnv.style.width = `${winW}px`;
 
-  const inPoint = clip.inPoint + winStart / state.pps;
-  const duration = winW / state.pps;
+  // timeline pixels map to source seconds through the clip's playback speed
+  const speed = clip.speed || 1;
+  const inPoint = clip.inPoint + (winStart / state.pps) * speed;
+  const duration = (winW / state.pps) * speed;
 
   const w = Math.max(2, Math.round(winW));
   const h = Math.max(2, Math.round(heightPx));
@@ -411,24 +419,32 @@ export function updateClipEl(clip) {
       wt.querySelector(".vol-hit").style.top = `${volPct}%`;
     });
 
-    // fades
-    const path = el.querySelector(".fade-line");
-    const svg = el.querySelector(".fade-svg");
-    if (path && svg) {
-      const h = el.clientHeight || 40;
-      svg.setAttribute("viewBox", `0 0 ${width} ${h}`);
-      let d = "";
-      const fi = (clip.fadeIn || 0) * pps;
-      const fo = (clip.fadeOut || 0) * pps;
-      if (fi > 0) d += `M 0 ${h} L ${fi} 0 `;
-      if (fo > 0) d += `M ${width - fo} 0 L ${width} ${h}`;
-      path.setAttribute("d", d);
+    // speed badge (bottom right) for slowed or sped-up clips
+    const speedTag = el.querySelector(".speed-tag");
+    if (speedTag) {
+      const speed = clip.speed || 1;
+      speedTag.hidden = Math.abs(speed - 1) < 0.001;
+      if (!speedTag.hidden) speedTag.textContent = `x${parseFloat(speed.toFixed(2))}`;
     }
-    const fadeL = el.querySelector(".fade-handle.left");
-    const fadeR = el.querySelector(".fade-handle.right");
-    if (fadeL) fadeL.style.left = `${(clip.fadeIn || 0) * pps}px`;
-    if (fadeR) fadeR.style.left = `${width - (clip.fadeOut || 0) * pps}px`;
   }
+
+  // fades (all clip kinds)
+  const path = el.querySelector(".fade-line");
+  const svg = el.querySelector(".fade-svg");
+  if (path && svg) {
+    const h = el.clientHeight || 40;
+    svg.setAttribute("viewBox", `0 0 ${width} ${h}`);
+    let d = "";
+    const fi = (clip.fadeIn || 0) * pps;
+    const fo = (clip.fadeOut || 0) * pps;
+    if (fi > 0) d += `M 0 ${h} L ${fi} 0 `;
+    if (fo > 0) d += `M ${width - fo} 0 L ${width} ${h}`;
+    path.setAttribute("d", d);
+  }
+  const fadeL = el.querySelector(".fade-handle.left");
+  const fadeR = el.querySelector(".fade-handle.right");
+  if (fadeL) fadeL.style.left = `${(clip.fadeIn || 0) * pps}px`;
+  if (fadeR) fadeR.style.left = `${width - (clip.fadeOut || 0) * pps}px`;
 }
 
 export function renderClips() {

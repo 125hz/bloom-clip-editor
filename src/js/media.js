@@ -137,6 +137,7 @@ export async function importFile(filePath) {
     fps,
     fadeIn: 0,
     fadeOut: 0,
+    speed: 1,
     opacity: 1,
     crop: { zoom: 1, cx: 0.5, cy: 0.5 },
     audioTracks: streams.length ? audioTracks : isAudio ? audioTracks : [],

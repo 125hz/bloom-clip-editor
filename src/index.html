@@ -12,8 +12,11 @@
     <header id="topbar">
       <span id="app-title">bloom<span class="dim"> :: </span>editor</span>
       <span class="spacer"></span>
+      <button class="tbtn" id="btn-new">new</button>
+      <button class="tbtn" id="btn-open">open</button>
+      <button class="tbtn" id="btn-save">save</button>
       <button class="tbtn" id="btn-settings">settings</button>
-      <button class="tbtn" id="btn-help">help</button>
+      <button class="tbtn" id="btn-help">about</button>
     </header>
 
     <main id="stage">
@@ -65,6 +68,30 @@
             <input type="range" id="txt-outline" min="0" max="0.02" step="0.001" />
           </label>
           <label class="field">
+            <span>letter gap <em id="txt-gap-val"></em></span>
+            <input type="range" id="txt-gap" min="0" max="0.1" step="0.002" />
+          </label>
+          <label class="field row">
+            <span>shadow</span>
+            <input type="color" id="txt-shadow-color" />
+          </label>
+          <label class="field">
+            <span>shadow x <em id="txt-shadow-x-val"></em></span>
+            <input type="range" id="txt-shadow-x" min="-0.02" max="0.02" step="0.001" />
+          </label>
+          <label class="field">
+            <span>shadow y <em id="txt-shadow-y-val"></em></span>
+            <input type="range" id="txt-shadow-y" min="-0.02" max="0.02" step="0.001" />
+          </label>
+          <label class="field">
+            <span>shadow opacity <em id="txt-shadow-op-val"></em></span>
+            <input type="range" id="txt-shadow-op" min="0" max="1" step="0.05" />
+          </label>
+          <label class="field">
+            <span>shadow blur <em id="txt-shadow-blur-val"></em></span>
+            <input type="range" id="txt-shadow-blur" min="0" max="0.05" step="0.002" />
+          </label>
+          <label class="field">
             <span>x <em id="txt-x-val"></em></span>
             <input type="range" id="txt-x" min="0" max="1" step="0.005" />
           </label>
@@ -72,15 +99,8 @@
             <span>y <em id="txt-y-val"></em></span>
             <input type="range" id="txt-y" min="0" max="1" step="0.005" />
           </label>
-          <label class="field">
-            <span>fade in <em id="txt-fadein-val"></em></span>
-            <input type="range" id="txt-fadein" min="0" max="3" step="0.05" />
-          </label>
-          <label class="field">
-            <span>fade out <em id="txt-fadeout-val"></em></span>
-            <input type="range" id="txt-fadeout" min="0" max="3" step="0.05" />
-          </label>
           <div class="panel-hint">drag text on the preview to position it</div>
+          <div class="panel-hint">double-click it to type &middot; drag the clip's corner handles to fade</div>
         </aside>
 
         <aside id="clip-panel" hidden>
@@ -136,6 +156,7 @@
           <button class="tbtn small" id="add-video-track">+ video track</button>
           <button class="tbtn small" id="add-audio-track">+ audio track</button>
           <button class="tbtn small" id="add-text-track">+ text track</button>
+          <button class="tbtn small" id="snap-btn" title="toggle snapping">snap: on</button>
           <span class="spacer"></span>
           <span id="status-line" class="dim"></span>
         </div>
@@ -216,6 +237,14 @@
         </select>
       </label>
 
+      <label class="field row">
+        <span>aspect ratio</span>
+        <select id="export-aspect">
+          <option value="keep" selected>keep (pad to fit)</option>
+          <option value="stretch">stretch to fill frame</option>
+        </select>
+      </label>
+
       <div class="modal-footer">
         <span class="dim">duration <b id="export-duration">0:00</b></span>
         <span class="dim">est. size <b id="export-est-size">--</b></span>
@@ -241,30 +270,39 @@
   <div id="settings-modal" class="overlay" hidden>
     <div class="modal">
       <div class="modal-header"><span>settings</span><button class="tbtn small" id="settings-close">x</button></div>
+      <label class="field row"><span>snapping (drag / trim / loop edges)</span><input type="checkbox" id="check-snapping" checked></label>
       <label class="field row"><span>magnetic snapping (ripple delete)</span><input type="checkbox" id="check-magnetic" checked></label>
       <label class="field row"><span>snap to clips on other layers</span><input type="checkbox" id="check-layer-snap" checked></label>
       <label class="field row"><span>pause at playhead</span><input type="checkbox" id="check-pause-at-playhead"></label>
+      <div class="settings-section">
+        <span>hotkeys</span>
+        <button class="tbtn small" id="hotkeys-reset">reset defaults</button>
+      </div>
+      <ul class="shortcut-list" id="hotkey-list"></ul>
+      <div class="panel-hint">click a binding, then press the new key combo &middot; esc cancels</div>
     </div>
   </div>
 
-  <!-- help modal -->
+  <!-- about modal -->
   <div id="help-modal" class="overlay" hidden>
     <div class="modal">
-      <div class="modal-header"><span>keyboard shortcuts</span><button class="tbtn small" id="help-close">x</button></div>
-      <ul class="shortcut-list">
-        <li><span>play / pause</span><span>space</span></li>
-        <li><span>split clip</span><span>s</span></li>
-        <li><span>select left / right of playhead</span><span>q / e</span></li>
-        <li><span>delete clip</span><span>del, backspace, d</span></li>
-        <li><span>seek frame</span><span>left / right arrows</span></li>
-        <li><span>zoom timeline (on playhead)</span><span>scroll wheel</span></li>
-        <li><span>add text</span><span>t</span></li>
-        <li><span>export</span><span>ctrl + m</span></li>
-        <li><span>undo / redo</span><span>ctrl + z / ctrl + y</span></li>
-      </ul>
+      <div class="modal-header"><span>about</span><button class="tbtn small" id="help-close">x</button></div>
+      <div class="about-block">
+        <p>created by: <a class="ext-link" href="#" data-url="https://x.com/halcyonpalace">@halcyonpalace</a>.</p>
+        <p>thanks to: bloom, craig, thomasina</p>
+        <p>motion blur forked from <a class="ext-link" href="#" data-url="https://github.com/f0e/blur">https://github.com/f0e/blur</a></p>
+      </div>
+      <div class="settings-section"><span>keyboard shortcuts</span></div>
+      <ul class="shortcut-list" id="help-shortcut-list"></ul>
     </div>
   </div>
 
+  <!-- boot / load screen -->
+  <div id="boot-overlay">
+    <span id="boot-title" data-typer>bloom editor</span>
+  </div>
+
+  <script type="module" src="js/boot.js"></script>
   <script type="module" src="js/main.js"></script>
 </body>
 

@@ -28,3 +28,6 @@ Thumbs.db
 # Env
 .env
 .env.*
+
+# Claude Code local config
+.claude/

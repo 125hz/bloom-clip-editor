@@ -197,6 +197,18 @@ fn cancel_export(state: tauri::State<export::ExportState>) {
     }
 }
 
+// -------------------- project save / load --------------------
+
+#[tauri::command]
+fn save_project(path: String, data: String) -> Result<(), String> {
+    std::fs::write(&path, data).map_err(|e| format!("failed to save project: {e}"))
+}
+
+#[tauri::command]
+fn load_project(path: String) -> Result<String, String> {
+    std::fs::read_to_string(&path).map_err(|e| format!("failed to read project: {e}"))
+}
+
 // -------------------- status --------------------
 
 #[derive(Serialize)]
@@ -217,13 +229,31 @@ fn tool_status() -> ToolStatus {
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_opener::init())
         .manage(export::ExportState::default())
+        .setup(|app| {
+            // default window size: 75% of the primary monitor, centered
+            if let Some(win) = app.get_webview_window("main") {
+                if let Ok(Some(monitor)) = win.primary_monitor() {
+                    let s = monitor.size();
+                    let _ = win.set_size(tauri::PhysicalSize::new(
+                        (s.width as f64 * 0.75).round() as u32,
+                        (s.height as f64 * 0.75).round() as u32,
+                    ));
+                    let _ = win.center();
+                }
+                let _ = win.show();
+            }
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             probe_media,
             extract_audio,
             generate_thumbnail,
             export_project,
             cancel_export,
+            save_project,
+            load_project,
             tool_status
         ])
         .run(tauri::generate_context!())

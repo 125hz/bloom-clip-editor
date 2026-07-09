@@ -12,6 +12,23 @@ export function on(name, fn) {
 
 // Tracks are ordered top -> bottom as displayed.
 // Video stacking: a video track displayed higher renders ON TOP of lower ones.
+export const HOTKEY_DEFAULTS = {
+  playPause: "space",
+  split: "s",
+  selectLeft: "q",
+  selectRight: "e",
+  addText: "t",
+  deleteClip: "d",
+  toggleSnapping: "n",
+  seekBack: "arrowleft",
+  seekFwd: "arrowright",
+  export: "ctrl+m",
+  undo: "ctrl+z",
+  redo: "ctrl+y",
+  save: "ctrl+s",
+  open: "ctrl+o",
+};
+
 export const state = {
   tracks: [
     { id: uid(), kind: "text", name: "t1" },
@@ -31,9 +48,11 @@ export const state = {
     v: 2,
     magneticSnapping: true,
     crossLayerSnapping: true,
+    snapping: true, // snap drags/trims/loop edges to clip edges + playhead
     pauseAtPlayhead: false,
     previewScale: 0.75,
     trackScale: 1,
+    hotkeys: { ...HOTKEY_DEFAULTS },
   },
 };
 
@@ -182,6 +201,34 @@ export function redo() {
   restore(redoStack.pop());
 }
 
+// -------------------- project load --------------------
+
+/// Replace the whole project (used by open-project). Clears history and
+/// resyncs the auto track-name counters so new tracks don't collide.
+export function replaceProject({ tracks, clips, baseAspect, time, loop, pps }) {
+  state.tracks = tracks;
+  state.clips = clips;
+  state.baseAspect = baseAspect || null;
+  state.time = time || 0;
+  state.anchorTime = state.time;
+  state.loop = loop || null;
+  if (pps > 0) state.pps = pps;
+  state.selectedId = null;
+
+  undoStack.length = 0;
+  redoStack.length = 0;
+
+  for (const kind of Object.keys(trackCounter)) trackCounter[kind] = 1;
+  for (const t of tracks) {
+    const n = parseInt(String(t.name || "").replace(/^\D+/, ""), 10);
+    if (n > trackCounter[t.kind]) trackCounter[t.kind] = n;
+  }
+
+  emit("selection-changed", null);
+  emit("loop-changed", state.loop);
+  emit("project-changed");
+}
+
 // -------------------- settings persistence --------------------
 
 const SETTINGS_KEY = "bloom-editor-settings";
@@ -195,6 +242,8 @@ export function loadSettings() {
     if (!saved.v || saved.v < 2) delete saved.previewScale;
     saved.v = 2;
     Object.assign(state.settings, saved);
+    // merge saved hotkeys over defaults so newly-added actions stay bound
+    state.settings.hotkeys = { ...HOTKEY_DEFAULTS, ...(saved.hotkeys || {}) };
   } catch {}
 }
 

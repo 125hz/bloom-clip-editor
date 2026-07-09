@@ -26,10 +26,44 @@ export async function saveExportDialog() {
   });
 }
 
+export async function saveProjectDialog() {
+  return await T.dialog.save({
+    title: "save project",
+    defaultPath: "untitled.bloom",
+    filters: [{ name: "bloom project", extensions: ["bloom"] }],
+  });
+}
+
+export async function openProjectDialog() {
+  return await T.dialog.open({
+    multiple: false,
+    title: "open project",
+    filters: [{ name: "bloom project", extensions: ["bloom"] }],
+  });
+}
+
+export function openExternal(url) {
+  invoke("plugin:opener|open_url", { url }).catch((e) => console.error("open url:", e));
+}
+
+export function setWindowTitle(title) {
+  try {
+    T.window.getCurrentWindow().setTitle(title);
+  } catch {}
+}
+
 export async function messageBox(msg, title = "bloom editor") {
   try {
     await T.dialog.message(String(msg), { title, kind: "error" });
   } catch {
     alert(msg);
+  }
+}
+
+export async function confirmBox(msg, title = "bloom editor") {
+  try {
+    return await T.dialog.confirm(String(msg), { title });
+  } catch {
+    return confirm(msg);
   }
 }

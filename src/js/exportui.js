@@ -40,6 +40,7 @@ function estimateMB(videoBps, audioBps, duration) {
 
 const rangeRow = document.getElementById("export-range-row");
 const rangeSelect = document.getElementById("export-range");
+const aspectSelect = document.getElementById("export-aspect");
 
 /// current export range: null = entire timeline
 function exportRange() {
@@ -159,6 +160,7 @@ for (const presetEl of modal.querySelectorAll(".preset")) {
       preset: key,
       targetSizeBytes: 0,
       crf: null,
+      stretch: aspectSelect.value === "stretch",
     });
   });
 }
@@ -175,12 +177,13 @@ document.getElementById("export-custom").addEventListener("click", () => {
     preset: "custom",
     targetSizeBytes: useLimit ? (parseFloat(targetMb.value) || 50) * 1024 * 1024 : 0,
     crf: useLimit ? null : parseFloat(crfSlider.value),
+    stretch: aspectSelect.value === "stretch",
   });
 });
 
 // -------------------- run --------------------
 
-function buildPayloadClips(range) {
+function buildPayloadClips(range, outW, outH) {
   const out = [];
   for (const c of state.clips) {
     let startTime = c.startTime;
@@ -188,6 +191,7 @@ function buildPayloadClips(range) {
     let duration = c.duration;
     let fadeIn = c.fadeIn || 0;
     let fadeOut = c.fadeOut || 0;
+    const speed = c.speed || 1;
 
     if (range) {
       // intersect the clip with the loop region and rebase to t=0
@@ -195,7 +199,7 @@ function buildPayloadClips(range) {
       const e = Math.min(clipEnd(c), range.end);
       if (e - s <= 0.01) continue;
       const cut = s - c.startTime;
-      if (c.kind !== "text") inPoint += cut;
+      if (c.kind !== "text") inPoint += cut * speed; // timeline cut -> source time
       if (cut > 0.001) fadeIn = 0; // fade start was cut off
       if (clipEnd(c) - e > 0.001) fadeOut = 0; // fade end was cut off
       startTime = s - range.start;
@@ -210,6 +214,7 @@ function buildPayloadClips(range) {
       duration,
       fadeIn,
       fadeOut,
+      speed,
       layer: layerIndex(c),
       opacity: c.opacity ?? 1,
       crop:
@@ -239,6 +244,14 @@ function buildPayloadClips(range) {
             color: c.text.color,
             outlineColor: c.text.outlineColor,
             outlineWidth: c.text.outlineWidth,
+            shadowColor: c.text.shadowColor || "#000000",
+            shadowX: c.text.shadowX || 0,
+            shadowY: c.text.shadowY || 0,
+            shadowOpacity: c.text.shadowOpacity ?? 1,
+            shadowBlur: c.text.shadowBlur || 0,
+            gap: c.text.gap || 0,
+            // letter gap needs per-glyph placement (drawtext has no tracking)
+            chars: (c.text.gap || 0) > 0 ? player.computeCharLayout(c, outW, outH) : null,
             x: c.text.x,
             y: c.text.y,
           }
@@ -253,7 +266,7 @@ let previewOffset = 0; // loop-region exports preview at range.start + t
 
 async function runExport(opts) {
   const range = exportRange();
-  const clips = buildPayloadClips(range);
+  const clips = buildPayloadClips(range, opts.width, opts.height);
   if (!clips.length) {
     emit("status", "nothing to export in the selected range");
     return;
@@ -265,6 +278,10 @@ async function runExport(opts) {
   modal.hidden = true;
   player.stop();
   state.exporting = true;
+  // frames are rendered through the main preview canvas and copied into the
+  // export overlay — hide the editor preview so only the overlay shows them
+  const previewBox = document.getElementById("preview-box");
+  previewBox.style.visibility = "hidden";
 
   fill.style.width = "0%";
   pctEl.textContent = "0%";
@@ -286,6 +303,7 @@ async function runExport(opts) {
         preset: opts.preset,
         targetSizeBytes: opts.targetSizeBytes || 0,
         crf: opts.crf,
+        stretch: !!opts.stretch,
       },
     });
     fill.style.width = "100%";
@@ -301,6 +319,8 @@ async function runExport(opts) {
     }
   } finally {
     state.exporting = false;
+    previewBox.style.visibility = "";
+    if (!state.playing) player.drawAtTime(state.time);
   }
 }
 

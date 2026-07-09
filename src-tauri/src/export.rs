@@ -43,6 +43,15 @@ pub struct ExportAudioTrack {
 
 #[derive(Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
+pub struct CharPos {
+    /// the glyph
+    pub c: String,
+    /// normalized center x of the glyph 0..1
+    pub x: f64,
+}
+
+#[derive(Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct TextStyle {
     pub content: String,
     #[serde(default)]
@@ -58,6 +67,23 @@ pub struct TextStyle {
     /// outline width as a fraction of output height
     #[serde(default)]
     pub outline_width: f64,
+    #[serde(default)]
+    pub shadow_color: String,
+    /// shadow offset as a fraction of output height
+    #[serde(default)]
+    pub shadow_x: f64,
+    #[serde(default)]
+    pub shadow_y: f64,
+    /// shadow opacity 0..1
+    #[serde(default = "default_one")]
+    pub shadow_opacity: f64,
+    /// shadow blur radius as a fraction of output height
+    #[serde(default)]
+    pub shadow_blur: f64,
+    /// per-line per-glyph placement, present when a letter gap is set
+    /// (the gap itself is applied by the frontend when computing these)
+    #[serde(default)]
+    pub chars: Option<Vec<Vec<CharPos>>>,
     /// normalized center position 0..1
     pub x: f64,
     pub y: f64,
@@ -87,6 +113,9 @@ pub struct ExportClip {
     pub fade_in: f64,
     #[serde(default)]
     pub fade_out: f64,
+    /// playback rate: 1 = normal, 0.25 = 4x slower
+    #[serde(default = "default_one")]
+    pub speed: f64,
     /// video stacking order: 0 = bottom layer
     #[serde(default)]
     pub layer: i64,
@@ -114,6 +143,9 @@ pub struct ExportPayload {
     #[serde(default)]
     pub target_size_bytes: f64,
     pub crf: Option<f64>,
+    /// stretch sources to fill the output frame instead of letterboxing
+    #[serde(default)]
+    pub stretch: bool,
 }
 
 #[derive(Serialize, Clone)]
@@ -295,6 +327,14 @@ fn build_filter_graph(
 
             let (idx, seek) = clip_inputs[*ci].ok_or("video clip without input")?;
             let local_in = c.in_point - seek; // input is pre-seeked with -ss
+            let speed = c.speed.clamp(0.05, 4.0);
+            // a slowed clip consumes duration*speed seconds of source and
+            // stretches them over `duration` seconds of timeline
+            let setpts = if (speed - 1.0).abs() > 1e-3 {
+                format!("setpts=(PTS-STARTPTS)/{}", f(speed))
+            } else {
+                "setpts=PTS-STARTPTS".to_string()
+            };
             let crop = match &c.crop {
                 Some(r) if r.w < 0.999 || r.h < 0.999 => format!(
                     "crop=w=iw*{:.4}:h=ih*{:.4}:x=iw*{:.4}:y=ih*{:.4},",
@@ -305,12 +345,19 @@ fn build_filter_graph(
                 ),
                 _ => String::new(),
             };
+            let fit = if p.stretch {
+                format!("scale={w}:{h}")
+            } else {
+                format!(
+                    "scale={w}:{h}:force_original_aspect_ratio=decrease,\
+pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:color=black@0.0"
+                )
+            };
             let mut chain = format!(
-                "[{idx}:v]trim=start={}:end={},setpts=PTS-STARTPTS,fps={fps},{crop}\
-scale={w}:{h}:force_original_aspect_ratio=decrease,\
-pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:color=black@0.0,setsar=1,format=yuva420p",
+                "[{idx}:v]trim=start={}:end={},{setpts},fps={fps},{crop}\
+{fit},setsar=1,format=yuva420p",
                 f(local_in),
-                f(local_in + c.duration)
+                f(local_in + c.duration * speed)
             );
             if c.opacity < 0.999 {
                 write!(chain, ",colorchannelmixer=aa={:.4}", c.opacity.clamp(0.0, 1.0)).unwrap();
@@ -419,6 +466,16 @@ pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:color=black@0.0,setsar=1,format=yuva420p",
             alpha = format!(":alpha='clip({expr},0,1)'");
         }
 
+        // shadow: hard offsets map to drawtext's shadow; a blur radius routes
+        // the shadow through its own transparent layer + gblur + overlay
+        let shadow_x_px = (t.shadow_x * h as f64).round() as i64;
+        let shadow_y_px = (t.shadow_y * h as f64).round() as i64;
+        let shadow_op = t.shadow_opacity.clamp(0.0, 1.0);
+        let shadow_blur_px = (t.shadow_blur * h as f64).max(0.0);
+        let has_shadow =
+            (shadow_x_px != 0 || shadow_y_px != 0 || shadow_blur_px >= 0.5) && shadow_op > 0.001;
+        let shadow_color = format!("{}@{:.3}", color_hex(&t.shadow_color, "000000"), shadow_op);
+
         // drawtext left-aligns lines inside a multi-line block, but the
         // preview centers each line — so emit one drawtext per line, each
         // centered horizontally, laid out like the canvas (line height 1.2em)
@@ -426,30 +483,34 @@ pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:color=black@0.0,setsar=1,format=yuva420p",
         let line_h = size_px * 1.2;
         let block_h = line_h * lines.len() as f64;
 
-        for (li, line) in lines.iter().enumerate() {
-            if line.trim().is_empty() {
-                continue;
-            }
-            let text_file = build_dir.join(format!("text_{i}_{li}.txt"));
-            std::fs::write(&text_file, line.as_bytes())
+        // one drawtext for (name, text, center, colors)
+        let emit_text = |g: &mut String,
+                         prev: &mut String,
+                         name: String,
+                         text: &str,
+                         center_x: f64,
+                         center_y: f64,
+                         font_color: &str,
+                         border_color: &str,
+                         inline_shadow: bool|
+         -> Result<(), String> {
+            let file_name = format!("{name}.txt");
+            std::fs::write(build_dir.join(&file_name), text.as_bytes())
                 .map_err(|e| format!("failed to write text file: {e}"))?;
-
-            let line_cy = (cy - block_h / 2.0 + line_h * (li as f64 + 0.5)).round();
-            let out = format!("vtx{i}_{li}");
             let mut dt = format!(
-                "[{prev}]drawtext=textfile={}:fontfile={}:fontsize={}:fontcolor={}:\
-x={cx}-text_w/2:y={line_cy}-text_h/2",
-                q(&format!("text_{i}_{li}.txt")),
+                "[{prev}]drawtext=textfile={}:fontfile={}:fontsize={}:fontcolor={font_color}:\
+x={center_x}-text_w/2:y={center_y}-text_h/2",
+                q(&file_name),
                 q(&font_path),
                 size_px,
-                color_hex(&t.color, "ffffff"),
             );
             if border_px >= 1.0 {
+                write!(dt, ":borderw={border_px}:bordercolor={border_color}").unwrap();
+            }
+            if inline_shadow {
                 write!(
                     dt,
-                    ":borderw={}:bordercolor={}",
-                    border_px,
-                    color_hex(&t.outline_color, "000000")
+                    ":shadowcolor={shadow_color}:shadowx={shadow_x_px}:shadowy={shadow_y_px}"
                 )
                 .unwrap();
             }
@@ -461,9 +522,107 @@ x={cx}-text_w/2:y={line_cy}-text_h/2",
                 f(c.start_time + c.duration)
             )
             .unwrap();
-            writeln!(g, "{dt}[{out}];").unwrap();
-            prev = out;
+            writeln!(g, "{dt}[{name}];").unwrap();
+            *prev = name;
+            Ok(())
+        };
+
+        // the whole block (all lines / glyphs) in one color at an offset
+        let emit_block = |g: &mut String,
+                          prev: &mut String,
+                          tag: &str,
+                          x_off: f64,
+                          y_off: f64,
+                          font_color: &str,
+                          border_color: &str,
+                          inline_shadow: bool|
+         -> Result<(), String> {
+            for (li, line) in lines.iter().enumerate() {
+                let line_cy = (cy - block_h / 2.0 + line_h * (li as f64 + 0.5) + y_off).round();
+                if let Some(char_lines) = &t.chars {
+                    // letter gap: per-glyph placement precomputed by the frontend
+                    let empty = Vec::new();
+                    let chars = char_lines.get(li).unwrap_or(&empty);
+                    for (ci, cp) in chars.iter().enumerate() {
+                        if cp.c.trim().is_empty() {
+                            continue;
+                        }
+                        let ccx = (cp.x.clamp(0.0, 1.0) * w as f64 + x_off).round();
+                        emit_text(
+                            g,
+                            prev,
+                            format!("{tag}_{li}_{ci}"),
+                            &cp.c,
+                            ccx,
+                            line_cy,
+                            font_color,
+                            border_color,
+                            inline_shadow,
+                        )?;
+                    }
+                } else {
+                    if line.trim().is_empty() {
+                        continue;
+                    }
+                    emit_text(
+                        g,
+                        prev,
+                        format!("{tag}_{li}"),
+                        line,
+                        (cx + x_off).round(),
+                        line_cy,
+                        font_color,
+                        border_color,
+                        inline_shadow,
+                    )?;
+                }
+            }
+            Ok(())
+        };
+
+        if has_shadow && shadow_blur_px >= 0.5 {
+            // blurred shadow: draw the block in shadow color on its own
+            // transparent full-length layer, blur it, overlay under the text
+            writeln!(
+                g,
+                "color=c=black@0.0:s={w}x{h}:r={fps}:d={},format=yuva420p[tsb{i}];",
+                f(total)
+            )
+            .unwrap();
+            let mut sh_prev = format!("tsb{i}");
+            emit_block(
+                &mut g,
+                &mut sh_prev,
+                &format!("tsd{i}"),
+                shadow_x_px as f64,
+                shadow_y_px as f64,
+                &shadow_color,
+                &shadow_color,
+                false,
+            )?;
+            writeln!(
+                g,
+                "[{sh_prev}]gblur=sigma={:.2}[tsg{i}];",
+                (shadow_blur_px / 2.0).max(0.5)
+            )
+            .unwrap();
+            writeln!(g, "[{prev}][tsg{i}]overlay=0:0:eof_action=pass[tso{i}];").unwrap();
+            prev = format!("tso{i}");
         }
+
+        let font_color = color_hex(&t.color, "ffffff");
+        let border_color = color_hex(&t.outline_color, "000000");
+        let inline_shadow = has_shadow && shadow_blur_px < 0.5;
+        emit_block(
+            &mut g,
+            &mut prev,
+            &format!("vtx{i}"),
+            0.0,
+            0.0,
+            &font_color,
+            &border_color,
+            inline_shadow,
+        )?;
     }
 
     writeln!(g, "[{prev}]format=yuv420p[vout];").unwrap();
@@ -479,15 +638,23 @@ x={cx}-text_w/2:y={line_cy}-text_h/2",
     {
         let Some((idx, seek)) = clip_inputs[ci] else { continue };
         let local_in = c.in_point - seek;
+        let speed = c.speed.clamp(0.05, 4.0);
+        // speed changes pitch like the editor does (tape-style): normalize to
+        // 48k, relabel the sample rate by the speed factor, resample back
+        let mut rate_fx = String::new();
+        if (speed - 1.0).abs() > 1e-3 {
+            let new_rate = (48000.0 * speed).round().max(1000.0) as i64;
+            rate_fx = format!(",aresample=48000,asetrate={new_rate}");
+        }
         for tr in c.audio_tracks.iter().filter(|t| t.enabled) {
             let delay_ms = (c.start_time * 1000.0).round().max(0.0) as u64;
             let label = format!("au{an}");
             an += 1;
             let mut chain = format!(
-                "[{idx}:a:{}]atrim=start={}:end={},asetpts=PTS-STARTPTS,volume={:.4},aresample=48000:async=1",
+                "[{idx}:a:{}]atrim=start={}:end={},asetpts=PTS-STARTPTS{rate_fx},volume={:.4},aresample=48000:async=1",
                 tr.audio_order,
                 f(local_in),
-                f(local_in + c.duration),
+                f(local_in + c.duration * speed),
                 tr.volume.clamp(0.0, 4.0)
             );
             if c.fade_in > 0.001 {
@@ -538,6 +705,7 @@ mod tests {
             duration: dur,
             fade_in: fi,
             fade_out: fo,
+            speed: 1.0,
             layer: 0,
             opacity: 1.0,
             crop: None,
@@ -556,6 +724,12 @@ mod tests {
             color: "#ffffff".into(),
             outline_color: "#000000".into(),
             outline_width: 0.004,
+            shadow_color: "#000000".into(),
+            shadow_x: 0.005,
+            shadow_y: 0.005,
+            shadow_opacity: 0.8,
+            shadow_blur: 0.0,
+            chars: None,
             x: 0.5,
             y: 0.3,
         });
@@ -568,6 +742,7 @@ mod tests {
             preset: "custom".into(),
             target_size_bytes: 0.0,
             crf: Some(23.0),
+            stretch: false,
         };
         let inputs = plan_inputs(&p);
         let dir = std::env::temp_dir().join("bloom-graph-test");
@@ -650,8 +825,8 @@ fn run_export_inner(
     for (c, input) in p.clips.iter().zip(&clip_inputs) {
         let Some((_, seek)) = input else { continue };
         // fast input seeking + bounded read: never decode more of the source
-        // than the clip actually uses
-        let read_len = (c.in_point - seek) + c.duration + 2.0;
+        // than the clip actually uses (duration*speed source seconds)
+        let read_len = (c.in_point - seek) + c.duration * c.speed.clamp(0.05, 4.0) + 2.0;
         cmd.args(["-ss", &f(*seek), "-t", &f(read_len), "-i", &c.file_path]);
     }
     cmd.args(["-filter_complex_script", "filter.txt"]);

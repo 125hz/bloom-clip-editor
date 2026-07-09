@@ -138,7 +138,9 @@ function syncVideos(t, playing) {
   for (const c of active) {
     const el = getVideoEl(c);
     el._active = true;
-    const expected = c.inPoint + (t - c.startTime);
+    const speed = c.speed || 1;
+    const expected = c.inPoint + (t - c.startTime) * speed;
+    if (el.playbackRate !== speed) el.playbackRate = speed;
     if (el.readyState >= 2) {
       // drift correction only while playing — paused seeks are owned by
       // seekPreview so it can redraw once the seek completes
@@ -181,6 +183,18 @@ const FONT_CSS = {
   bahnschrift: "Bahnschrift, sans-serif",
 };
 
+export function fontCss(name) {
+  return FONT_CSS[name] || FONT_CSS.consolas;
+}
+
+// text clip being edited inline on the preview — its canvas copy is hidden
+// so the contenteditable overlay is the only visible instance
+let editingTextId = null;
+export function setEditingText(id) {
+  editingTextId = id;
+  if (!state.playing) draw(state.time);
+}
+
 function drawableSource(entry) {
   const el = entry?.el;
   if (el && el.readyState >= 2 && el.videoWidth) {
@@ -213,43 +227,118 @@ function fadeAlpha(c, t) {
   return clamp(a, 0, 1);
 }
 
-export function textBlockMetrics(c, W, H) {
+function measureLine(c2d, line, gapPx) {
+  if (gapPx <= 0) return c2d.measureText(line).width;
+  let w = 0;
+  for (const ch of line) w += c2d.measureText(ch).width + gapPx;
+  return line.length ? w - gapPx : 0;
+}
+
+export function textBlockMetrics(c, W, H, c2d = ctx) {
   const s = c.text;
   const px = Math.max(1, s.size * H);
-  ctx.font = `${s.bold ? "bold " : ""}${px}px ${FONT_CSS[s.font] || FONT_CSS.consolas}`;
+  c2d.font = `${s.bold ? "bold " : ""}${px}px ${FONT_CSS[s.font] || FONT_CSS.consolas}`;
+  const gapPx = (s.gap || 0) * H;
   const lines = String(s.content || "").split("\n");
   const lineH = px * 1.2;
-  let maxW = 0;
-  for (const line of lines) maxW = Math.max(maxW, ctx.measureText(line).width);
+  const lineWidths = lines.map((line) => measureLine(c2d, line, gapPx));
+  const maxW = Math.max(0, ...lineWidths);
   return {
     x: s.x * W - maxW / 2,
     y: s.y * H - (lineH * lines.length) / 2,
     w: maxW,
     h: lineH * lines.length,
     lines,
+    lineWidths,
     lineH,
     px,
+    gapPx,
   };
+}
+
+export function rgbaFromHex(hex, alpha) {
+  const c = String(hex || "#000000").replace("#", "");
+  const r = parseInt(c.slice(0, 2), 16) || 0;
+  const g = parseInt(c.slice(2, 4), 16) || 0;
+  const b = parseInt(c.slice(4, 6), 16) || 0;
+  return `rgba(${r},${g},${b},${clamp(alpha ?? 1, 0, 1)})`;
+}
+
+export function hasTextShadow(s) {
+  return (s.shadowX || s.shadowY || s.shadowBlur > 0) && (s.shadowOpacity ?? 1) > 0;
+}
+
+function applyTextShadow(s, H) {
+  if (hasTextShadow(s)) {
+    ctx.shadowColor = rgbaFromHex(s.shadowColor, s.shadowOpacity ?? 1);
+    ctx.shadowOffsetX = (s.shadowX || 0) * H;
+    ctx.shadowOffsetY = (s.shadowY || 0) * H;
+    ctx.shadowBlur = (s.shadowBlur || 0) * H;
+  }
+}
+
+function clearTextShadow() {
+  ctx.shadowColor = "transparent";
+  ctx.shadowOffsetX = 0;
+  ctx.shadowOffsetY = 0;
+  ctx.shadowBlur = 0;
 }
 
 function drawTextClip(c, W, H) {
   const s = c.text;
   if (!s) return;
   const m = textBlockMetrics(c, W, H);
-  ctx.textAlign = "center";
   ctx.textBaseline = "middle";
-  const cx = s.x * W;
-  for (let i = 0; i < m.lines.length; i++) {
-    const y = s.y * H - m.h / 2 + m.lineH * (i + 0.5);
+  applyTextShadow(s, H);
+
+  const paint = (text, x, y) => {
     if (s.outlineWidth > 0) {
       ctx.strokeStyle = s.outlineColor || "#000000";
       ctx.lineWidth = Math.max(1, s.outlineWidth * H * 2);
       ctx.lineJoin = "round";
-      ctx.strokeText(m.lines[i], cx, y);
+      ctx.strokeText(text, x, y);
     }
     ctx.fillStyle = s.color || "#ffffff";
-    ctx.fillText(m.lines[i], cx, y);
+    ctx.fillText(text, x, y);
+  };
+
+  for (let i = 0; i < m.lines.length; i++) {
+    const y = s.y * H - m.h / 2 + m.lineH * (i + 0.5);
+    if (m.gapPx > 0) {
+      // letter gap: draw per character so preview matches the export layout
+      ctx.textAlign = "left";
+      let x = s.x * W - m.lineWidths[i] / 2;
+      for (const ch of m.lines[i]) {
+        paint(ch, x, y);
+        x += ctx.measureText(ch).width + m.gapPx;
+      }
+    } else {
+      ctx.textAlign = "center";
+      paint(m.lines[i], s.x * W, y);
+    }
   }
+  clearTextShadow();
+}
+
+/// Per-character layout for export when a letter gap is set: normalized
+/// center x of every glyph at the output resolution, so ffmpeg drawtext can
+/// place each char exactly where the canvas does.
+let measureCanvasCtx = null;
+export function computeCharLayout(c, outW, outH) {
+  if (!measureCanvasCtx) measureCanvasCtx = document.createElement("canvas").getContext("2d");
+  const c2d = measureCanvasCtx;
+  const m = textBlockMetrics(c, outW, outH, c2d);
+  const s = c.text;
+  return m.lines.map((line, i) => {
+    let x = s.x * outW - m.lineWidths[i] / 2;
+    const chars = [];
+    for (const ch of line) {
+      const w = c2d.measureText(ch).width;
+      chars.push({ c: ch, x: (x + w / 2) / outW });
+      x += w + m.gapPx;
+    }
+    return chars;
+  });
 }
 
 export function activeTextClips(t) {
@@ -305,6 +394,7 @@ export function draw(t = state.time) {
 
   const texts = activeTextClips(t);
   for (const c of texts) {
+    if (c.id === editingTextId) continue;
     ctx.globalAlpha = fadeAlpha(c, t);
     drawTextClip(c, W, H);
   }
@@ -349,17 +439,20 @@ function scheduleSegment(seg, now) {
   const buffer = entry && entry.audioBuffer;
   if (!buffer) return; // still decoding; scheduler will retry
 
+  const speed = clamp(c.speed || 1, 0.05, 4);
   let startAt = clockStartCtx + (c.startTime - clockStartTime);
-  let offset = c.inPoint;
+  let offset = c.inPoint; // in buffer (source) time
   if (startAt < now + 0.01) {
-    offset += now + 0.01 - startAt;
+    offset += (now + 0.01 - startAt) * speed;
     startAt = now + 0.01;
   }
-  const remain = Math.min(c.inPoint + c.duration, buffer.duration) - offset;
+  // duration arg of start() is measured in buffer content seconds
+  const remain = Math.min(c.inPoint + c.duration * speed, buffer.duration) - offset;
   if (remain <= 0.005) return;
 
   const src = audioCtx.createBufferSource();
   src.buffer = buffer;
+  if (speed !== 1) src.playbackRate.value = speed;
   const fadeGain = audioCtx.createGain();
   const volGain = audioCtx.createGain();
   volGain.gain.value = clamp(tr.volume ?? 1, 0, 4);
@@ -537,7 +630,7 @@ export function seekPreview(t) {
 
   for (const c of active) {
     const el = getVideoEl(c);
-    const expected = c.inPoint + (t - c.startTime);
+    const expected = c.inPoint + (t - c.startTime) * (c.speed || 1);
     const redraw = () => {
       if (ticket !== seekTicket || state.playing) return;
       draw(t);

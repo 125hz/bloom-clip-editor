@@ -422,6 +422,28 @@ input[type=number]::-webkit-inner-spin-button { -webkit-appearance: none; }
 }
 .clip.kind-text .clip-inner::before { content: "t "; color: var(--dim); }
 
+/* slowed-down clip badge (ctrl+drag an edge) */
+.speed-tag {
+  position: absolute;
+  right: 2px;
+  bottom: 2px;
+  font-size: 10px;
+  color: var(--bg);
+  background: var(--dim2);
+  padding: 0 3px;
+  z-index: 7;
+  pointer-events: none;
+}
+
+/* snapping indicator */
+#snap-btn.off { color: var(--dim); border-color: var(--line); }
+
+/* about modal */
+.about-block { display: flex; flex-direction: column; gap: 4px; }
+.about-block p { margin: 0; }
+.ext-link { color: var(--fg); text-decoration: underline; cursor: pointer; }
+.ext-link:hover { background: var(--fg); color: var(--bg); }
+
 .handle {
   position: absolute;
   top: 0; bottom: 0;
@@ -618,7 +640,225 @@ input[type=number]::-webkit-inner-spin-button { -webkit-appearance: none; }
 .shortcut-list li {
   display: flex;
   justify-content: space-between;
+  align-items: center;
   border-bottom: 1px dotted var(--line);
   padding-bottom: 4px;
 }
 .shortcut-list li span:last-child { color: var(--dim2); }
+
+/* -------------------- settings: editable hotkeys -------------------- */
+.settings-section {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  color: var(--dim2);
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 6px;
+  margin-top: 8px;
+  letter-spacing: 2px;
+}
+.hk-bind { min-width: 96px; }
+.hk-bind.capturing {
+  background: var(--fg);
+  color: var(--bg);
+  border-color: var(--fg);
+}
+.hk-bind.capturing::before, .hk-bind.capturing::after { color: var(--bg); }
+
+/* -------------------- inline text editing on the preview -------------------- */
+#text-inline-editor {
+  position: absolute;
+  transform: translate(-50%, -50%);
+  text-align: center;
+  white-space: pre;
+  line-height: 1.2;
+  background: transparent;
+  border: 1px dashed rgba(255, 255, 255, 0.35);
+  outline: none;
+  padding: 0 2px;
+  z-index: 30;
+  caret-color: #ffffff;
+  min-width: 8px;
+}
+
+/* -------------------- boot / load screen -------------------- */
+@font-face {
+  font-family: "PP Neue Montreal";
+  src: url("fonts/PPNeueMontreal_Semibold.otf") format("opentype");
+  font-weight: 600;
+  font-style: normal;
+  font-display: swap;
+}
+
+#boot-overlay {
+  position: fixed;
+  inset: 0;
+  background: #000000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  z-index: 1000;
+  opacity: 1;
+  transition: opacity 0.65s ease;
+}
+#boot-overlay.fade-out {
+  opacity: 0;
+  pointer-events: none;
+}
+
+#boot-title {
+  font-family: "PP Neue Montreal", "Segoe UI", sans-serif;
+  font-weight: 600;
+  font-size: clamp(32px, 6vw, 72px);
+  letter-spacing: -0.01em;
+  line-height: 1.12;
+  user-select: none;
+  /* hidden until the reveal actually starts — the raw text paints before the
+     typer script wraps it in chars, which otherwise flashes for a frame */
+  opacity: 0;
+}
+#boot-title[data-typer-type="in"],
+#boot-title[data-typer-type="done"] {
+  opacity: 1;
+}
+
+/* Typer — the styling for the character reveal (from arlan.me/vault/typer).
+   The engine (boot.js) swaps each char's class between these states; the CSS
+   makes a state look like a solid pill, an outlined pill, an accent block...
+   Adjacent same-state chars round only at the two outer ends, so a run reads
+   as one continuous rounded bar.
+     --typer-fg          the base ink (plain letters, ink pills, ink borders)
+     --typer-bg          the page / knockout color inside a filled pill
+     --typer-accent      the accent surface (accent pill fills, accent borders)
+     --typer-accent-ink  the text color that sits ON an accent fill */
+[data-typer] {
+  --typer-fg: #ffffff;
+  --typer-bg: #000000;
+  --typer-accent: #ff3b5c;
+  --typer-accent-ink: #ffffff;
+  --typer-radius: 5px;
+}
+
+/* before the reveal runs, the whole line is invisible (chars are charInit);
+   a quick fade on entry smooths the first character popping in */
+[data-typer] {
+  transition: opacity 0.22s ease;
+}
+[data-typer][data-typer-type="initial"] {
+  opacity: 0;
+}
+
+[data-typer] .word {
+  white-space: pre;
+}
+
+[data-typer] .word .char {
+  box-sizing: content-box;
+  display: inline-block;
+  color: var(--typer-fg);
+  background: transparent;
+  transition: none;
+}
+
+[data-typer] .word .char.charInit {
+  color: transparent;
+}
+
+/* solid pill: ink block, knockout text; adjacent fills merge into one bar */
+[data-typer] .word .char.charFill {
+  color: var(--typer-bg);
+  background: var(--typer-fg);
+  border-radius: var(--typer-radius);
+}
+[data-typer] .word .char.charFill:has(+ .charFill) {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+}
+[data-typer] .word .char.charFill + .charFill {
+  border-radius: 0;
+}
+[data-typer] .word .char.charFill + .charFill:last-child,
+[data-typer] .word .char.charFill + .charFill:has(+ :not(.charFill)) {
+  border-radius: 0 var(--typer-radius) var(--typer-radius) 0;
+}
+
+/* inverse: ink knockout, no rounding (a hard block) */
+[data-typer] .word .char.charInverse {
+  color: var(--typer-bg);
+  background: var(--typer-fg);
+}
+
+/* accent: colored letters on the page (no pill) */
+[data-typer] .word .char.charAccent {
+  color: var(--typer-accent);
+  background: transparent;
+}
+
+/* accent inverse: an accent pill with knockout text; merges into a bar */
+[data-typer] .word .char.charAccentInverse {
+  color: var(--typer-accent-ink);
+  background: var(--typer-accent);
+  border-radius: var(--typer-radius);
+}
+[data-typer] .word .char.charAccentInverse:has(+ .charAccentInverse) {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+}
+[data-typer] .word .char.charAccentInverse + .charAccentInverse {
+  border-radius: 0;
+}
+[data-typer] .word .char.charAccentInverse + .charAccentInverse:last-child,
+[data-typer]
+  .word
+  .char.charAccentInverse
+  + .charAccentInverse:has(+ :not(.charAccentInverse)) {
+  border-radius: 0 var(--typer-radius) var(--typer-radius) 0;
+}
+
+/* accent fill: a briefly solid block of pure accent (both fill and text) */
+[data-typer] .word .char.charAccentFill {
+  color: var(--typer-accent);
+  background: var(--typer-accent);
+}
+
+/* outlined pill: an accent border box around ink text; runs merge by
+   dropping the inner vertical borders instead of the fill */
+[data-typer] .word .char.charBorder {
+  position: relative;
+  color: var(--typer-fg);
+}
+[data-typer] .word .char.charBorder::after {
+  content: "";
+  display: inline-block;
+  position: absolute;
+  inset: 0;
+  border: 1px solid var(--typer-accent);
+  border-radius: var(--typer-radius);
+}
+[data-typer] .word .char.charBorder:has(+ .charBorder)::after {
+  border-right: 1px solid transparent;
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+}
+[data-typer] .word .char.charBorder + .charBorder::after {
+  border-left: 1px solid transparent;
+  border-right: 1px solid transparent;
+  border-radius: 0;
+}
+[data-typer] .word .char.charBorder + .charBorder:last-child::after,
+[data-typer] .word .char.charBorder + .charBorder:has(+ :not(.charBorder))::after {
+  border-left: 1px solid transparent;
+  border-right: 1px solid var(--typer-accent);
+  border-radius: 0 var(--typer-radius) var(--typer-radius) 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #boot-title,
+  [data-typer][data-typer-type="initial"] {
+    opacity: 1;
+  }
+  [data-typer] .word .char.charInit {
+    color: var(--typer-fg);
+  }
+}

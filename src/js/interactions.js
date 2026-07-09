@@ -55,23 +55,43 @@ export function allowedStart(trackId, dur, proposed, excludeId) {
   return Math.max(0, best ?? proposed);
 }
 
+/// candidate snap targets: timeline start, playhead, loop bounds, clip edges
+function snapPoints({ excludeId = null, kind = null, includeLoop = true } = {}) {
+  const points = [0, state.time];
+  if (includeLoop && state.loop) points.push(state.loop.start, state.loop.end);
+  for (const c of state.clips) {
+    if (c.id === excludeId) continue;
+    // snap against every layer, or only same-kind layers when disabled
+    if (kind && !state.settings.crossLayerSnapping && trackById(c.trackId)?.kind !== kind)
+      continue;
+    points.push(c.startTime, clipEnd(c));
+  }
+  return points;
+}
+
+/// snap a single time value to the nearest candidate point
+export function snapTime(t, opts = {}) {
+  if (!state.settings.snapping) return t;
+  const threshold = 10 / state.pps;
+  let best = t;
+  let bestDiff = threshold;
+  for (const p of snapPoints(opts)) {
+    const diff = Math.abs(t - p);
+    if (diff < bestDiff) {
+      bestDiff = diff;
+      best = p;
+    }
+  }
+  return best;
+}
+
 function applySnapping(proposed, clip, trackId) {
+  if (!state.settings.snapping) return Math.max(0, proposed);
   const threshold = 10 / state.pps;
   let best = proposed;
   let bestDiff = threshold;
 
-  const points = [0, state.time];
-  if (state.loop) points.push(state.loop.start, state.loop.end);
-  for (const c of state.clips) {
-    if (c.id === clip.id) continue;
-    // snap against every layer, or only same-kind layers when disabled
-    if (
-      !state.settings.crossLayerSnapping &&
-      trackById(c.trackId)?.kind !== trackById(trackId)?.kind
-    )
-      continue;
-    points.push(c.startTime, clipEnd(c));
-  }
+  const points = snapPoints({ excludeId: clip.id, kind: trackById(trackId)?.kind });
   for (const p of points) {
     // snap clip start to point
     let diff = Math.abs(proposed - p);
@@ -87,6 +107,13 @@ function applySnapping(proposed, clip, trackId) {
     }
   }
   return Math.max(0, best);
+}
+
+export function toggleSnapping() {
+  state.settings.snapping = !state.settings.snapping;
+  emit("settings-changed");
+  emit("snapping-changed", state.settings.snapping);
+  emit("status", `snapping ${state.settings.snapping ? "on" : "off"}`);
 }
 
 // -------------------- scrubbing --------------------
@@ -139,8 +166,9 @@ tlScroll.addEventListener("mousedown", (e) => {
   const move = (ev) => {
     if (!looping && Math.abs(ev.clientX - startX) < 5) return;
     looping = true;
-    const t1 = timeAtClientX(ev.clientX);
-    state.loop = { start: Math.min(t0, t1), end: Math.max(t0, t1) };
+    const t1 = snapTime(timeAtClientX(ev.clientX), { includeLoop: false });
+    const ts = snapTime(t0, { includeLoop: false });
+    state.loop = { start: Math.min(ts, t1), end: Math.max(ts, t1) };
     updateLoopRegion();
     renderRuler();
   };
@@ -174,7 +202,7 @@ for (const handle of document.querySelectorAll("#loop-region .loop-handle")) {
 
     const move = (ev) => {
       if (!state.loop) return;
-      const t = timeAtClientX(ev.clientX);
+      const t = snapTime(timeAtClientX(ev.clientX), { includeLoop: false });
       if (isLeft) state.loop.start = clamp(t, 0, state.loop.end - 0.15);
       else state.loop.end = Math.max(t, state.loop.start + 0.15);
       updateLoopRegion();
@@ -218,7 +246,9 @@ tlContent.addEventListener("mousedown", (e) => {
   } else if (e.target.classList.contains("fade-handle")) {
     startFadeDrag(e, clip, e.target.classList.contains("left"));
   } else if (e.target.classList.contains("handle")) {
-    if (e.target.classList.contains("left")) startTrimLeft(e, clip);
+    const isLeft = e.target.classList.contains("left");
+    if (e.ctrlKey && clip.kind !== "text") startSpeedDrag(e, clip, isLeft);
+    else if (isLeft) startTrimLeft(e, clip);
     else startTrimRight(e, clip);
   } else {
     startDragClip(e, clip, clipEl);
@@ -226,8 +256,9 @@ tlContent.addEventListener("mousedown", (e) => {
 });
 
 tlContent.addEventListener("dblclick", (e) => {
-  // handled by the volume / opacity reset handlers
+  // handled by the volume / opacity / speed reset handlers
   if (e.target.classList.contains("vol-hit") || e.target.classList.contains("opacity-hit")) return;
+  if (e.ctrlKey || e.target.classList.contains("handle")) return;
   const clipEl = e.target.closest(".clip");
   if (!clipEl) return;
   const clip = clipById(clipEl.dataset.id);
@@ -309,18 +340,20 @@ function startTrimLeft(e, clip) {
   const in0 = clip.inPoint;
   const d0 = clip.duration;
   const isText = clip.kind === "text";
+  const speed = clip.speed || 1;
 
   const move = (ev) => {
     const dt = (ev.clientX - startX) / state.pps;
-    const minStart = isText ? 0 : Math.max(0, s0 - in0);
-    const newStart = clamp(s0 + dt, minStart, s0 + d0 - MIN_CLIP_DURATION);
-    const delta = newStart - s0;
+    // extending left is limited by the unused source ahead of the in-point
+    const minStart = isText ? 0 : Math.max(0, s0 - in0 / speed);
+    const proposed = snapTime(s0 + dt, { excludeId: clip.id, kind: clip.kind });
+    const newStart = clamp(proposed, minStart, s0 + d0 - MIN_CLIP_DURATION);
     // don't allow crossing the previous clip in the track
     const prev = clipsInTrack(clip.trackId).filter((c) => c.id !== clip.id && clipEnd(c) <= s0 + 0.001).pop();
     const bounded = prev ? Math.max(newStart, clipEnd(prev)) : newStart;
     const bdelta = bounded - s0;
     clip.startTime = bounded;
-    if (!isText) clip.inPoint = Math.max(0, in0 + bdelta);
+    if (!isText) clip.inPoint = Math.max(0, in0 + bdelta * speed);
     clip.duration = Math.max(MIN_CLIP_DURATION, d0 - bdelta);
     clip.fadeIn = Math.min(clip.fadeIn || 0, clip.duration);
     clip.fadeOut = Math.min(clip.fadeOut || 0, clip.duration);
@@ -342,11 +375,14 @@ function startTrimRight(e, clip) {
   const startX = e.clientX;
   const d0 = clip.duration;
   const isText = clip.kind === "text";
+  const speed = clip.speed || 1;
 
   const move = (ev) => {
     const dt = (ev.clientX - startX) / state.pps;
-    const maxDur = isText ? Infinity : clip.sourceDuration - clip.inPoint;
-    let dur = clamp(d0 + dt, MIN_CLIP_DURATION, maxDur);
+    // remaining source, expressed in timeline seconds at the current speed
+    const maxDur = isText ? Infinity : (clip.sourceDuration - clip.inPoint) / speed;
+    const proposedEnd = snapTime(clip.startTime + d0 + dt, { excludeId: clip.id, kind: clip.kind });
+    let dur = clamp(proposedEnd - clip.startTime, MIN_CLIP_DURATION, maxDur);
     // don't overlap the next clip in the track
     const next = clipsInTrack(clip.trackId).find(
       (c) => c.id !== clip.id && c.startTime >= clip.startTime + 0.001
@@ -367,6 +403,82 @@ function startTrimRight(e, clip) {
   window.addEventListener("mousemove", move);
   window.addEventListener("mouseup", up);
 }
+
+// -------------------- speed (ctrl+drag an edge) --------------------
+
+/// Ctrl+dragging a clip edge stretches or squeezes the same source content
+/// over a different timeline span — drag outward to slow down (to x0.05),
+/// inward to speed up (to x4). Ctrl+double-click an edge resets to x1.
+function startSpeedDrag(e, clip, isLeft) {
+  pushHistory();
+  const startX = e.clientX;
+  const s0 = clip.startTime;
+  const d0 = clip.duration;
+  const speed0 = clip.speed || 1;
+  const contentLen = d0 * speed0; // source seconds the clip consumes
+  const end0 = s0 + d0;
+
+  const move = (ev) => {
+    const dt = (ev.clientX - startX) / state.pps;
+    let newDur = isLeft ? d0 - dt : d0 + dt;
+
+    // speed stays in [0.05, 4]
+    newDur = clamp(newDur, contentLen / 4, contentLen / 0.05);
+    newDur = Math.max(newDur, MIN_CLIP_DURATION);
+
+    if (isLeft) {
+      let newStart = end0 - newDur;
+      const prev = clipsInTrack(clip.trackId)
+        .filter((c) => c.id !== clip.id && clipEnd(c) <= s0 + 0.001)
+        .pop();
+      newStart = Math.max(newStart, prev ? clipEnd(prev) : 0, 0);
+      newDur = end0 - newStart;
+      clip.startTime = newStart;
+    } else {
+      const next = clipsInTrack(clip.trackId).find(
+        (c) => c.id !== clip.id && c.startTime >= s0 + 0.001
+      );
+      if (next) newDur = Math.min(newDur, next.startTime - s0);
+    }
+
+    clip.duration = Math.max(MIN_CLIP_DURATION, newDur);
+    clip.speed = clamp(contentLen / clip.duration, 0.05, 4);
+    clip.fadeIn = Math.min(clip.fadeIn || 0, clip.duration);
+    clip.fadeOut = Math.min(clip.fadeOut || 0, clip.duration);
+    updateClipEl(clip);
+  };
+  const up = () => {
+    window.removeEventListener("mousemove", move);
+    window.removeEventListener("mouseup", up);
+    emit("project-changed");
+    player.rescheduleAudio();
+    if (!state.playing) player.seekPreview(state.time);
+  };
+  window.addEventListener("mousemove", move);
+  window.addEventListener("mouseup", up);
+}
+
+// ctrl+double-click a trim handle resets the clip's speed to x1
+tlContent.addEventListener("dblclick", (e) => {
+  if (!e.ctrlKey || !e.target.classList.contains("handle")) return;
+  const clip = clipById(e.target.closest(".clip")?.dataset.id);
+  if (!clip || clip.kind === "text") return;
+  e.stopPropagation();
+  pushHistory();
+  const contentLen = clip.duration * (clip.speed || 1);
+  let dur = contentLen;
+  const next = clipsInTrack(clip.trackId).find(
+    (c) => c.id !== clip.id && c.startTime >= clip.startTime + 0.001
+  );
+  if (next) dur = Math.min(dur, next.startTime - clip.startTime);
+  clip.duration = Math.max(MIN_CLIP_DURATION, dur);
+  clip.speed = 1;
+  clip.fadeIn = Math.min(clip.fadeIn || 0, clip.duration);
+  clip.fadeOut = Math.min(clip.fadeOut || 0, clip.duration);
+  emit("project-changed");
+  player.rescheduleAudio();
+  if (!state.playing) player.seekPreview(state.time);
+});
 
 // -------------------- fades --------------------
 
@@ -529,7 +641,8 @@ export function splitAtPlayhead() {
     ...JSON.parse(JSON.stringify(clip)),
     id: uid(),
     startTime: t,
-    inPoint: clip.kind === "text" ? 0 : clip.inPoint + offset,
+    // timeline offset maps to source time through the clip's playback speed
+    inPoint: clip.kind === "text" ? 0 : clip.inPoint + offset * (clip.speed || 1),
     duration: clip.duration - offset,
     fadeIn: 0,
   };
