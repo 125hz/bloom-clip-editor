@@ -148,6 +148,146 @@ function updateEstimate() {
   void dur;
 }
 
+// -------------------- motion blur (inspired by f0e/blur) --------------------
+
+const mb = {
+  enable: document.getElementById("mb-enable"),
+  amount: document.getElementById("mb-amount"),
+  amountVal: document.getElementById("mb-amount-val"),
+  interp: document.getElementById("mb-interp"),
+  weighting: document.getElementById("mb-weighting"),
+  brightness: document.getElementById("mb-brightness"),
+  brightnessVal: document.getElementById("mb-brightness-val"),
+  saturation: document.getElementById("mb-saturation"),
+  saturationVal: document.getElementById("mb-saturation-val"),
+  contrast: document.getElementById("mb-contrast"),
+  contrastVal: document.getElementById("mb-contrast-val"),
+  gamma: document.getElementById("mb-gamma"),
+  gammaVal: document.getElementById("mb-gamma-val"),
+  presetSelect: document.getElementById("mb-preset-select"),
+  presetName: document.getElementById("mb-preset-name"),
+};
+
+const MB_STORE_KEY = "bloom-mb-presets";
+
+function mbSettings() {
+  return {
+    enabled: mb.enable.checked,
+    interpFps: Math.max(60, parseFloat(mb.interp.value) || 480),
+    amount: parseFloat(mb.amount.value) || 0,
+    weighting: mb.weighting.value,
+    brightness: parseFloat(mb.brightness.value),
+    saturation: parseFloat(mb.saturation.value),
+    contrast: parseFloat(mb.contrast.value),
+    gamma: parseFloat(mb.gamma.value),
+  };
+}
+
+function mbApply(s) {
+  mb.enable.checked = !!s.enabled;
+  mb.amount.value = s.amount ?? 1;
+  mb.interp.value = s.interpFps ?? 480;
+  mb.weighting.value = s.weighting || "equal";
+  mb.brightness.value = s.brightness ?? 1;
+  mb.saturation.value = s.saturation ?? 1;
+  mb.contrast.value = s.contrast ?? 1;
+  mb.gamma.value = s.gamma ?? 1;
+  mbSyncLabels();
+}
+
+function mbSyncLabels() {
+  mb.amountVal.textContent = mb.amount.value;
+  mb.brightnessVal.textContent = mb.brightness.value;
+  mb.saturationVal.textContent = mb.saturation.value;
+  mb.contrastVal.textContent = mb.contrast.value;
+  mb.gammaVal.textContent = mb.gamma.value;
+}
+for (const el of [mb.amount, mb.brightness, mb.saturation, mb.contrast, mb.gamma]) {
+  el.addEventListener("input", mbSyncLabels);
+}
+
+function mbStore() {
+  try {
+    return JSON.parse(localStorage.getItem(MB_STORE_KEY)) || { presets: {}, default: null };
+  } catch {
+    return { presets: {}, default: null };
+  }
+}
+
+function mbSaveStore(store) {
+  try {
+    localStorage.setItem(MB_STORE_KEY, JSON.stringify(store));
+  } catch {}
+}
+
+function mbRefreshPresetList(selected = "") {
+  const store = mbStore();
+  mb.presetSelect.innerHTML = "";
+  const none = document.createElement("option");
+  none.value = "";
+  none.textContent = "(none)";
+  mb.presetSelect.appendChild(none);
+  for (const name of Object.keys(store.presets).sort()) {
+    const opt = document.createElement("option");
+    opt.value = name;
+    opt.textContent = name === store.default ? `${name} (default)` : name;
+    mb.presetSelect.appendChild(opt);
+  }
+  mb.presetSelect.value = selected;
+}
+
+mb.presetSelect.addEventListener("change", () => {
+  const store = mbStore();
+  const preset = store.presets[mb.presetSelect.value];
+  if (preset) mbApply(preset);
+});
+
+document.getElementById("mb-preset-save").addEventListener("click", () => {
+  const name = mb.presetName.value.trim();
+  if (!name) {
+    emit("status", "enter a preset name first");
+    return;
+  }
+  const store = mbStore();
+  store.presets[name] = mbSettings();
+  mbSaveStore(store);
+  mb.presetName.value = "";
+  mbRefreshPresetList(name);
+  emit("status", `saved blur preset "${name}"`);
+});
+
+document.getElementById("mb-preset-delete").addEventListener("click", () => {
+  const name = mb.presetSelect.value;
+  if (!name) return;
+  const store = mbStore();
+  delete store.presets[name];
+  if (store.default === name) store.default = null;
+  mbSaveStore(store);
+  mbRefreshPresetList();
+  emit("status", `deleted blur preset "${name}"`);
+});
+
+document.getElementById("mb-preset-default").addEventListener("click", () => {
+  const name = mb.presetSelect.value;
+  const store = mbStore();
+  store.default = name || null;
+  mbSaveStore(store);
+  mbRefreshPresetList(name);
+  emit("status", name ? `"${name}" is now the default blur preset` : "default blur preset cleared");
+});
+
+// load the default preset on startup
+{
+  const store = mbStore();
+  if (store.default && store.presets[store.default]) {
+    mbApply(store.presets[store.default]);
+    mbRefreshPresetList(store.default);
+  } else {
+    mbRefreshPresetList();
+    mbSyncLabels();
+  }
+}
+
 // preset clicks
 for (const presetEl of modal.querySelectorAll(".preset")) {
   presetEl.addEventListener("click", () => {
@@ -304,6 +444,7 @@ async function runExport(opts) {
         targetSizeBytes: opts.targetSizeBytes || 0,
         crf: opts.crf,
         stretch: !!opts.stretch,
+        motionBlur: mb.enable.checked ? mbSettings() : null,
       },
     });
     fill.style.width = "100%";

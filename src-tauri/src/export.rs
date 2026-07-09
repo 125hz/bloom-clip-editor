@@ -130,6 +130,37 @@ pub struct ExportClip {
     pub text: Option<TextStyle>,
 }
 
+fn default_interp_fps() -> f64 {
+    480.0
+}
+
+/// Motion blur inspired by f0e/blur: interpolate to a high framerate, blend a
+/// window of interpolated frames per output frame, then sample down to the
+/// export fps chosen in the render settings.
+#[derive(Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct MotionBlur {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_interp_fps")]
+    pub interp_fps: f64,
+    /// blend window as a fraction of an output frame interval (1 = full frame)
+    #[serde(default = "default_one")]
+    pub amount: f64,
+    /// equal | gaussian | pyramid | vegas
+    #[serde(default)]
+    pub weighting: String,
+    /// filters use blur-style multipliers where 1 = neutral
+    #[serde(default = "default_one")]
+    pub brightness: f64,
+    #[serde(default = "default_one")]
+    pub saturation: f64,
+    #[serde(default = "default_one")]
+    pub contrast: f64,
+    #[serde(default = "default_one")]
+    pub gamma: f64,
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExportPayload {
@@ -146,6 +177,35 @@ pub struct ExportPayload {
     /// stretch sources to fill the output frame instead of letterboxing
     #[serde(default)]
     pub stretch: bool,
+    #[serde(default)]
+    pub motion_blur: Option<MotionBlur>,
+}
+
+fn blend_weights(mode: &str, n: usize) -> String {
+    let weights: Vec<f64> = match mode {
+        "gaussian" => {
+            let sigma = (n as f64 / 6.0).max(0.5);
+            (0..n)
+                .map(|i| {
+                    let x = i as f64 - (n as f64 - 1.0) / 2.0;
+                    (-(x * x) / (2.0 * sigma * sigma)).exp()
+                })
+                .collect()
+        }
+        "pyramid" => {
+            let half = (n as f64 - 1.0) / 2.0;
+            (0..n).map(|i| half - (i as f64 - half).abs() + 1.0).collect()
+        }
+        "vegas" => (0..n)
+            .map(|i| if i == 0 || i == n - 1 { 1.0 } else { 2.0 })
+            .collect(),
+        _ => vec![1.0; n],
+    };
+    weights
+        .iter()
+        .map(|v| format!("{v:.4}"))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 #[derive(Serialize, Clone)]
@@ -625,7 +685,38 @@ x={center_x}-text_w/2:y={center_y}-text_h/2",
         )?;
     }
 
-    writeln!(g, "[{prev}]format=yuv420p[vout];").unwrap();
+    // ---- motion blur (interpolate -> weighted frame blend -> output fps) ----
+    let mut tail = String::new();
+    if let Some(mb) = p.motion_blur.as_ref().filter(|m| m.enabled) {
+        let interp = mb.interp_fps.clamp(fps, 1920.0);
+        let frames =
+            ((((interp / fps) * mb.amount.clamp(0.0, 4.0)).round() as i64).clamp(2, 128)) as usize;
+        write!(
+            tail,
+            "minterpolate=fps={}:mi_mode=mci:mc_mode=aobmc:me_mode=bidir:vsbmc=1,\
+tmix=frames={frames}:weights='{}',fps={fps},",
+            f(interp),
+            blend_weights(&mb.weighting, frames)
+        )
+        .unwrap();
+        // blur-style multipliers (1 = neutral); eq brightness is additive
+        let brightness = (mb.brightness - 1.0).clamp(-1.0, 1.0);
+        let saturation = mb.saturation.clamp(0.0, 3.0);
+        let contrast = mb.contrast.clamp(-2.0, 2.0);
+        let gamma = mb.gamma.clamp(0.1, 10.0);
+        if brightness.abs() > 1e-3
+            || (saturation - 1.0).abs() > 1e-3
+            || (contrast - 1.0).abs() > 1e-3
+            || (gamma - 1.0).abs() > 1e-3
+        {
+            write!(
+                tail,
+                "eq=brightness={brightness:.4}:saturation={saturation:.4}:contrast={contrast:.4}:gamma={gamma:.4},"
+            )
+            .unwrap();
+        }
+    }
+    writeln!(g, "[{prev}]{tail}format=yuv420p[vout];").unwrap();
 
     // ---- audio ----
     let mut audio_labels: Vec<String> = Vec::new();
@@ -743,6 +834,16 @@ mod tests {
             target_size_bytes: 0.0,
             crf: Some(23.0),
             stretch: false,
+            motion_blur: Some(MotionBlur {
+                enabled: true,
+                interp_fps: 480.0,
+                amount: 1.0,
+                weighting: "gaussian".into(),
+                brightness: 1.0,
+                saturation: 1.1,
+                contrast: 1.0,
+                gamma: 1.0,
+            }),
         };
         let inputs = plan_inputs(&p);
         let dir = std::env::temp_dir().join("bloom-graph-test");
