@@ -137,11 +137,19 @@ fn default_interp_fps() -> f64 {
 /// Motion blur inspired by f0e/blur: interpolate to a high framerate, blend a
 /// window of interpolated frames per output frame, then sample down to the
 /// export fps chosen in the render settings.
+fn default_method() -> String {
+    "fast".into()
+}
+
 #[derive(Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct MotionBlur {
     #[serde(default)]
     pub enabled: bool,
+    /// "fast": run the whole graph at interp_fps and blend (no motion
+    /// estimation); "interpolate": minterpolate to interp_fps (slow)
+    #[serde(default = "default_method")]
+    pub method: String,
     #[serde(default = "default_interp_fps")]
     pub interp_fps: f64,
     /// blend window as a fraction of an output frame interval (1 = full frame)
@@ -217,6 +225,8 @@ struct ProgressEvent {
     current_frame: u64,
     total_frames: u64,
     eta_seconds: f64,
+    /// ffmpeg's encoding speed string, e.g. "0.85x"
+    speed: String,
 }
 
 fn f(v: f64) -> String {
@@ -340,6 +350,13 @@ fn build_filter_graph(
     build_dir: &std::path::Path,
 ) -> Result<String, String> {
     let (w, h, fps) = (p.width, p.height, p.fps);
+    let mb_active = p.motion_blur.as_ref().filter(|m| m.enabled);
+    // "fast" motion blur runs the whole graph at the interpolated rate and
+    // blends real frames — no motion estimation, so it renders far quicker
+    let gfps = match mb_active {
+        Some(m) if m.method != "interpolate" => m.interp_fps.clamp(fps, 960.0),
+        _ => fps,
+    };
     let mut g = String::new();
 
     // ---- video layers ----
@@ -378,7 +395,7 @@ fn build_filter_graph(
                 seg_n += 1;
                 writeln!(
                     g,
-                    "color=c=black@0.0:s={w}x{h}:r={fps}:d={},format=yuva420p,setsar=1[{label}];",
+                    "color=c=black@0.0:s={w}x{h}:r={gfps}:d={},format=yuva420p,setsar=1[{label}];",
                     f(gap)
                 )
                 .unwrap();
@@ -414,7 +431,7 @@ pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:color=black@0.0"
                 )
             };
             let mut chain = format!(
-                "[{idx}:v]trim=start={}:end={},{setpts},fps={fps},{crop}\
+                "[{idx}:v]trim=start={}:end={},{setpts},fps={gfps},{crop}\
 {fit},setsar=1,format=yuva420p",
                 f(local_in),
                 f(local_in + c.duration * speed)
@@ -447,7 +464,7 @@ pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:color=black@0.0"
             seg_n += 1;
             writeln!(
                 g,
-                "color=c=black@0.0:s={w}x{h}:r={fps}:d={},format=yuva420p,setsar=1[{label}];",
+                "color=c=black@0.0:s={w}x{h}:r={gfps}:d={},format=yuva420p,setsar=1[{label}];",
                 f(tail)
             )
             .unwrap();
@@ -467,7 +484,7 @@ pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:color=black@0.0"
     // base + overlay compositing
     writeln!(
         g,
-        "color=c=black:s={w}x{h}:r={fps}:d={},format=yuv420p,setsar=1[vbase];",
+        "color=c=black:s={w}x{h}:r={gfps}:d={},format=yuv420p,setsar=1[vbase];",
         f(total)
     )
     .unwrap();
@@ -645,7 +662,7 @@ x={center_x}-text_w/2:y={center_y}-text_h/2",
             // transparent full-length layer, blur it, overlay under the text
             writeln!(
                 g,
-                "color=c=black@0.0:s={w}x{h}:r={fps}:d={},format=yuva420p[tsb{i}];",
+                "color=c=black@0.0:s={w}x{h}:r={gfps}:d={},format=yuva420p[tsb{i}];",
                 f(total)
             )
             .unwrap();
@@ -685,20 +702,32 @@ x={center_x}-text_w/2:y={center_y}-text_h/2",
         )?;
     }
 
-    // ---- motion blur (interpolate -> weighted frame blend -> output fps) ----
+    // ---- motion blur (high-rate frame blend -> output fps) ----
     let mut tail = String::new();
-    if let Some(mb) = p.motion_blur.as_ref().filter(|m| m.enabled) {
-        let interp = mb.interp_fps.clamp(fps, 1920.0);
-        let frames =
-            ((((interp / fps) * mb.amount.clamp(0.0, 4.0)).round() as i64).clamp(2, 128)) as usize;
-        write!(
-            tail,
-            "minterpolate=fps={}:mi_mode=mci:mc_mode=aobmc:me_mode=bidir:vsbmc=1,\
+    if let Some(mb) = mb_active {
+        let amount = mb.amount.clamp(0.0, 4.0);
+        if mb.method == "interpolate" {
+            // quality: motion-estimated interpolation, then blend
+            let interp = mb.interp_fps.clamp(fps, 1920.0);
+            let frames = ((((interp / fps) * amount).round() as i64).clamp(2, 128)) as usize;
+            write!(
+                tail,
+                "minterpolate=fps={}:mi_mode=mci:mc_mode=aobmc:me_mode=bidir:vsbmc=1,\
 tmix=frames={frames}:weights='{}',fps={fps},",
-            f(interp),
-            blend_weights(&mb.weighting, frames)
-        )
-        .unwrap();
+                f(interp),
+                blend_weights(&mb.weighting, frames)
+            )
+            .unwrap();
+        } else {
+            // fast: the graph already runs at gfps — just blend and sample down
+            let frames = ((((gfps / fps) * amount).round() as i64).clamp(2, 128)) as usize;
+            write!(
+                tail,
+                "tmix=frames={frames}:weights='{}',fps={fps},",
+                blend_weights(&mb.weighting, frames)
+            )
+            .unwrap();
+        }
         // blur-style multipliers (1 = neutral); eq brightness is additive
         let brightness = (mb.brightness - 1.0).clamp(-1.0, 1.0);
         let saturation = mb.saturation.clamp(0.0, 3.0);
@@ -836,6 +865,7 @@ mod tests {
             stretch: false,
             motion_blur: Some(MotionBlur {
                 enabled: true,
+                method: "fast".into(),
                 interp_fps: 480.0,
                 amount: 1.0,
                 weighting: "gaussian".into(),
@@ -974,12 +1004,15 @@ fn run_export_inner(
     let started = std::time::Instant::now();
     if let Some(out) = child.stdout.take() {
         let mut current_frame: u64 = 0;
+        let mut speed = String::new();
         for line in BufReader::new(out).lines().map_while(Result::ok) {
             if state.cancelled.load(Ordering::SeqCst) {
                 break;
             }
             if let Some(v) = line.strip_prefix("frame=") {
                 current_frame = v.trim().parse().unwrap_or(current_frame);
+            } else if let Some(v) = line.strip_prefix("speed=") {
+                speed = v.trim().to_string();
             } else if let Some(v) = line.strip_prefix("out_time_us=") {
                 let secs = v.trim().parse::<f64>().unwrap_or(0.0) / 1_000_000.0;
                 let pct = (secs / total).clamp(0.0, 1.0);
@@ -994,6 +1027,7 @@ fn run_export_inner(
                         current_frame,
                         total_frames,
                         eta_seconds: eta.max(0.0),
+                        speed: speed.clone(),
                     },
                 );
             }
@@ -1033,6 +1067,7 @@ fn run_export_inner(
             current_frame: total_frames,
             total_frames,
             eta_seconds: 0.0,
+            speed: String::new(),
         },
     );
     Ok(())

@@ -152,6 +152,8 @@ function updateEstimate() {
 
 const mb = {
   enable: document.getElementById("mb-enable"),
+  settings: document.getElementById("mb-settings"),
+  method: document.getElementById("mb-method"),
   amount: document.getElementById("mb-amount"),
   amountVal: document.getElementById("mb-amount-val"),
   interp: document.getElementById("mb-interp"),
@@ -173,6 +175,7 @@ const MB_STORE_KEY = "bloom-mb-presets";
 function mbSettings() {
   return {
     enabled: mb.enable.checked,
+    method: mb.method.value,
     interpFps: Math.max(60, parseFloat(mb.interp.value) || 480),
     amount: parseFloat(mb.amount.value) || 0,
     weighting: mb.weighting.value,
@@ -185,6 +188,7 @@ function mbSettings() {
 
 function mbApply(s) {
   mb.enable.checked = !!s.enabled;
+  mb.method.value = s.method || "fast";
   mb.amount.value = s.amount ?? 1;
   mb.interp.value = s.interpFps ?? 480;
   mb.weighting.value = s.weighting || "equal";
@@ -192,8 +196,13 @@ function mbApply(s) {
   mb.saturation.value = s.saturation ?? 1;
   mb.contrast.value = s.contrast ?? 1;
   mb.gamma.value = s.gamma ?? 1;
+  mb.settings.hidden = !mb.enable.checked;
   mbSyncLabels();
 }
+
+mb.enable.addEventListener("change", () => {
+  mb.settings.hidden = !mb.enable.checked;
+});
 
 function mbSyncLabels() {
   mb.amountVal.textContent = mb.amount.value;
@@ -477,7 +486,8 @@ listen("export-progress", (event) => {
   const pct = Math.round((p.percent || 0) * 100);
   fill.style.width = `${pct}%`;
   pctEl.textContent = `${pct}%`;
-  framesEl.textContent = `frame ${p.currentFrame || 0} / ${p.totalFrames || 0}`;
+  const speed = p.speed && p.speed !== "N/A" ? ` · ${p.speed}` : "";
+  framesEl.textContent = `frame ${p.currentFrame || 0} / ${p.totalFrames || 0}${speed}`;
   const eta = Math.max(0, Math.round(p.etaSeconds || 0));
   etaEl.textContent = `eta ${Math.floor(eta / 60)}:${String(eta % 60).padStart(2, "0")}`;
 

@@ -31,3 +31,6 @@ Thumbs.db
 
 # Claude Code local config
 .claude/
+
+# scratch
+src-tauri/mbbench/

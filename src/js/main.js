@@ -137,7 +137,7 @@ function wireModal(openBtnId, modalId, closeBtnId, onOpen) {
   });
 }
 wireModal("btn-settings", "settings-modal", "settings-close", () => renderHotkeyList());
-wireModal("btn-help", "help-modal", "help-close", () => renderHelpList());
+wireModal("btn-help", "help-modal", "help-close");
 
 const checkMagnetic = document.getElementById("check-magnetic");
 const checkLayerSnap = document.getElementById("check-layer-snap");
@@ -187,6 +187,17 @@ function renderHotkeyList() {
     li.append(name, btn);
     hotkeyList.appendChild(li);
   }
+  // fixed (non-rebindable) gestures, listed for reference
+  for (const [label, keys] of FIXED_SHORTCUTS) {
+    const li = document.createElement("li");
+    li.className = "hk-fixed";
+    const name = document.createElement("span");
+    name.textContent = label;
+    const k = document.createElement("span");
+    k.textContent = keys;
+    li.append(name, k);
+    hotkeyList.appendChild(li);
+  }
 }
 
 function startCapture(action, btn) {
@@ -234,25 +245,6 @@ document.getElementById("hotkeys-reset").addEventListener("click", () => {
   renderHotkeyList();
 });
 
-// -------------------- help modal (generated from the live keymap) --------------------
-
-function renderHelpList() {
-  const ul = document.getElementById("help-shortcut-list");
-  ul.innerHTML = "";
-  const add = (label, keys) => {
-    const li = document.createElement("li");
-    const l = document.createElement("span");
-    l.textContent = label;
-    const k = document.createElement("span");
-    k.textContent = keys;
-    li.append(l, k);
-    ul.appendChild(li);
-  };
-  for (const action of HOTKEY_ACTIONS) {
-    add(action.label, state.settings.hotkeys[action.id] || "unbound");
-  }
-  for (const [label, keys] of FIXED_SHORTCUTS) add(label, keys);
-}
 
 // about links open in the default browser
 for (const link of document.querySelectorAll(".ext-link")) {

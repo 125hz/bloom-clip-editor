@@ -143,10 +143,27 @@ function syncVideos(t, playing) {
     if (el.playbackRate !== speed) el.playbackRate = speed;
     if (el.readyState >= 2) {
       // drift correction only while playing — paused seeks are owned by
-      // seekPreview so it can redraw once the seek completes
-      if (playing && Math.abs(el.currentTime - expected) > 0.12) safeSeek(el, expected, c);
+      // seekPreview so it can redraw once the seek completes. Never re-seek
+      // an element that is still seeking: piling seeks on a decoder that is
+      // catching up (e.g. right after a loop wrap) stalls it for seconds.
+      if (playing && !el.seeking && Math.abs(el.currentTime - expected) > 0.12) {
+        safeSeek(el, expected, c);
+      }
       if (playing && el.paused && !el.ended) el.play().catch(() => {});
       if (!playing && !el.paused) el.pause();
+    }
+  }
+
+  // nearing the end of a loop region: warm up the decoders for the clips
+  // visible at the loop start so the wrap doesn't flash black
+  if (playing && state.loop && t > state.loop.end - PRELOAD_AHEAD && t < state.loop.end) {
+    for (const c of activeVideoClips(state.loop.start)) {
+      const el = getVideoEl(c);
+      if (el._active) continue; // still on screen; can't pre-position it
+      const expected = c.inPoint + (state.loop.start - c.startTime) * (c.speed || 1);
+      if (el.readyState >= 1 && !el.seeking && Math.abs(el.currentTime - expected) > 0.25) {
+        safeSeek(el, expected, c);
+      }
     }
   }
 
@@ -609,6 +626,13 @@ export function seek(t) {
   t = Math.max(0, t);
   state.time = t;
   if (state.playing && audioCtx) {
+    // freeze the current frames while the videos seek — the compositor falls
+    // back to these holds instead of flashing black (loop wraps especially)
+    for (const entry of pool.values()) {
+      if (entry.el._active && entry.el.readyState >= 2 && entry.el.videoWidth) {
+        captureHold(entry);
+      }
+    }
     stopAudio();
     clockStartCtx = audioCtx.currentTime;
     clockStartTime = t;

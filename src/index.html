@@ -235,6 +235,14 @@
           <span>enable motion blur</span>
           <input type="checkbox" id="mb-enable">
         </label>
+        <div id="mb-settings" hidden>
+        <label class="field row">
+          <span>render method</span>
+          <select id="mb-method">
+            <option value="fast" selected>fast (frame blend)</option>
+            <option value="interpolate">quality (interpolated, slow)</option>
+          </select>
+        </label>
         <label class="field">
           <span>blur amount <em id="mb-amount-val">1</em></span>
           <input type="range" id="mb-amount" min="0" max="2" step="0.05" value="1">
@@ -279,8 +287,9 @@
           <input type="text" id="mb-preset-name" placeholder="preset name" style="flex:1">
           <button class="tbtn small" id="mb-preset-save">save preset</button>
         </div>
+        </div>
         <div class="dim note">applies to preset and custom exports when enabled &middot; the exported
-          fps comes from the render settings &middot; interpolation is slow at high fps</div>
+          fps comes from the render settings</div>
       </div>
 
       <label class="field row" id="export-range-row" hidden>
@@ -346,8 +355,6 @@
         <p>thanks to: bloom, craig, thomasina</p>
         <p>motion blur forked from <a class="ext-link" href="#" data-url="https://github.com/f0e/blur">https://github.com/f0e/blur</a></p>
       </div>
-      <div class="settings-section"><span>keyboard shortcuts</span></div>
-      <ul class="shortcut-list" id="help-shortcut-list"></ul>
     </div>
   </div>
 

@@ -83,7 +83,7 @@ html, body {
 .tbtn:disabled { color: var(--dim); border-color: var(--line); cursor: default; }
 .tbtn:disabled:hover { background: transparent; color: var(--dim); }
 
-select, input[type="number"], textarea {
+select, input[type="number"], input[type="text"], textarea {
   font-family: var(--mono);
   font-size: 12px;
   background: var(--bg);
@@ -93,8 +93,31 @@ select, input[type="number"], textarea {
   outline: none;
 }
 select:focus, input:focus, textarea:focus { border-color: var(--fg); }
+input::placeholder { color: var(--dim); }
 
-input[type="checkbox"] { accent-color: #ffffff; }
+input[type="checkbox"] {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 14px;
+  height: 14px;
+  background: var(--bg);
+  border: 1px solid var(--line-bright);
+  cursor: pointer;
+  position: relative;
+  margin: 0;
+}
+input[type="checkbox"]:hover { border-color: var(--fg); }
+input[type="checkbox"]:checked::after {
+  content: "x";
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--fg);
+  font-size: 11px;
+  line-height: 1;
+}
 input[type="color"] {
   background: var(--bg);
   border: 1px solid var(--line-bright);
@@ -658,6 +681,7 @@ input[type=number]::-webkit-inner-spin-button { -webkit-appearance: none; }
   letter-spacing: 2px;
 }
 .hk-bind { min-width: 96px; }
+.hk-fixed span { color: var(--dim); }
 .hk-bind.capturing {
   background: var(--fg);
   color: var(--bg);

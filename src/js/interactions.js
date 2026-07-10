@@ -19,6 +19,7 @@ import {
   tlContent,
   timeAtClientX,
   requestRender,
+  renderClips,
   updateClipEl,
   updatePlayhead,
   updateLoopRegion,
@@ -151,14 +152,8 @@ rulerCanvas.addEventListener("mousedown", (e) => {
   beginScrub(e);
 });
 
-// empty track area: click = seek, drag = create loop region
-tlScroll.addEventListener("mousedown", (e) => {
-  if (e.button !== 0) return;
-  const onClip = e.target.closest(".clip");
-  const onLabel = e.target.closest(".track-label");
-  if (onClip || onLabel || e.target.classList.contains("loop-handle")) return;
-  setSelected(null);
-
+/// drag out a loop region; optionally treat a no-drag release as a seek
+function beginLoopDrag(e, seekOnClick) {
   const t0 = timeAtClientX(e.clientX);
   const startX = e.clientX;
   let looping = false;
@@ -181,7 +176,7 @@ tlScroll.addEventListener("mousedown", (e) => {
       updateLoopRegion();
       renderRuler();
       emit("loop-changed", state.loop);
-    } else {
+    } else if (seekOnClick) {
       const t = timeAtClientX(ev.clientX);
       state.anchorTime = t;
       player.seek(t);
@@ -190,7 +185,49 @@ tlScroll.addEventListener("mousedown", (e) => {
   };
   window.addEventListener("mousemove", move);
   window.addEventListener("mouseup", up);
+}
+
+// empty track area: click = seek, drag = create loop region
+tlScroll.addEventListener("mousedown", (e) => {
+  if (e.button !== 0) return;
+  const onClip = e.target.closest(".clip");
+  const onLabel = e.target.closest(".track-label");
+  if (onClip || onLabel || e.target.classList.contains("loop-handle")) return;
+  setSelected(null);
+  beginLoopDrag(e, true);
 });
+
+// middle-click drag: quick loop region anywhere on the timeline
+for (const target of [tlScroll, rulerCanvas]) {
+  target.addEventListener("mousedown", (e) => {
+    if (e.button !== 1 || state.exporting) return;
+    e.preventDefault(); // no autoscroll cursor
+    beginLoopDrag(e, false);
+  });
+}
+
+/// place a loop edge at the playhead (N / M hotkeys)
+export function setLoopEdge(which) {
+  const t = state.time;
+  let loop = state.loop ? { ...state.loop } : null;
+  if (which === "start") {
+    if (!loop) loop = { start: t, end: t + 1 };
+    else {
+      loop.start = t;
+      if (loop.end < loop.start + 0.15) loop.end = loop.start + 0.15;
+    }
+  } else {
+    if (!loop) loop = { start: Math.max(0, t - 1), end: Math.max(t, 0.15) };
+    else {
+      loop.end = Math.max(t, 0.15);
+      if (loop.start > loop.end - 0.15) loop.start = Math.max(0, loop.end - 0.15);
+    }
+  }
+  state.loop = loop;
+  updateLoopRegion();
+  renderRuler();
+  emit("loop-changed", state.loop);
+}
 
 // loop region edge handles
 for (const handle of document.querySelectorAll("#loop-region .loop-handle")) {
@@ -250,6 +287,8 @@ tlContent.addEventListener("mousedown", (e) => {
     if (e.ctrlKey && clip.kind !== "text") startSpeedDrag(e, clip, isLeft);
     else if (isLeft) startTrimLeft(e, clip);
     else startTrimRight(e, clip);
+  } else if (e.shiftKey) {
+    startDuplicateDrag(e, clip);
   } else {
     startDragClip(e, clip, clipEl);
   }
@@ -280,8 +319,20 @@ function trackRowAtY(clientY, kind) {
   return null;
 }
 
-function startDragClip(e, clip, clipEl) {
+/// shift+drag: clone the clip and drag the clone with the cursor
+function startDuplicateDrag(e, clip) {
   pushHistory();
+  const dupe = JSON.parse(JSON.stringify(clip));
+  dupe.id = uid();
+  state.clips.push(dupe);
+  renderClips(); // create the clone's element synchronously so we can drag it
+  const el = tlContent.querySelector(`.clip[data-id="${dupe.id}"]`);
+  setSelected(dupe.id);
+  if (el) startDragClip(e, dupe, el, { skipHistory: true, removeIfUnmoved: true });
+}
+
+function startDragClip(e, clip, clipEl, opts = {}) {
+  if (!opts.skipHistory) pushHistory();
   const startX = e.clientX;
   const origStart = clip.startTime;
   const origTrack = clip.trackId;
@@ -322,6 +373,11 @@ function startDragClip(e, clip, clipEl) {
       emit("project-changed");
       player.rescheduleAudio();
       if (!state.playing) player.seekPreview(state.time);
+    } else if (opts.removeIfUnmoved) {
+      // duplicate that never left its origin would overlap the original
+      state.clips = state.clips.filter((c) => c.id !== clip.id);
+      setSelected(null);
+      emit("project-changed");
     } else {
       clip.trackId = origTrack;
     }

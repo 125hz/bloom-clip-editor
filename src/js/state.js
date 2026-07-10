@@ -19,7 +19,9 @@ export const HOTKEY_DEFAULTS = {
   selectRight: "e",
   addText: "t",
   deleteClip: "d",
-  toggleSnapping: "n",
+  toggleSnapping: "b",
+  loopStart: "n",
+  loopEnd: "m",
   seekBack: "arrowleft",
   seekFwd: "arrowright",
   export: "ctrl+m",
@@ -240,7 +242,11 @@ export function loadSettings() {
     const saved = JSON.parse(raw);
     // v2: preview quality default moved 50% -> 75%
     if (!saved.v || saved.v < 2) delete saved.previewScale;
-    saved.v = 2;
+    // v3: snapping default moved n -> b (n/m became the loop edge keys)
+    if ((saved.v || 0) < 3 && saved.hotkeys?.toggleSnapping === "n") {
+      delete saved.hotkeys.toggleSnapping;
+    }
+    saved.v = 3;
     Object.assign(state.settings, saved);
     // merge saved hotkeys over defaults so newly-added actions stay bound
     state.settings.hotkeys = { ...HOTKEY_DEFAULTS, ...(saved.hotkeys || {}) };

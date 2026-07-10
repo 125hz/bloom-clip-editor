@@ -9,6 +9,7 @@ import {
   deleteSelected,
   selectSideOfPlayhead,
   toggleSnapping,
+  setLoopEdge,
 } from "./interactions.js";
 import { addTextClip } from "./textpanel.js";
 import { openExportModal } from "./exportui.js";
@@ -36,6 +37,8 @@ export const HOTKEY_ACTIONS = [
   { id: "addText", label: "add text", run: () => addTextClip() },
   { id: "deleteClip", label: "delete clip", run: () => deleteSelected() },
   { id: "toggleSnapping", label: "toggle snapping", run: () => toggleSnapping() },
+  { id: "loopStart", label: "set loop start at playhead", run: () => setLoopEdge("start") },
+  { id: "loopEnd", label: "set loop end at playhead", run: () => setLoopEdge("end") },
   { id: "seekBack", label: "seek frame back", run: () => stepFrame(-1) },
   { id: "seekFwd", label: "seek frame forward", run: () => stepFrame(1) },
   { id: "export", label: "export", run: () => openExportModal() },
@@ -51,7 +54,10 @@ export const FIXED_SHORTCUTS = [
   ["redo (alternate)", "ctrl + shift + z"],
   ["zoom timeline (on playhead)", "scroll wheel"],
   ["track height", "ctrl + scroll wheel"],
-  ["slow down clip", "ctrl + drag clip edge"],
+  ["change clip speed", "ctrl + drag clip edge"],
+  ["reset clip speed", "ctrl + double-click edge"],
+  ["duplicate clip", "shift + drag clip"],
+  ["loop region", "middle-click drag"],
   ["edit text on preview", "double-click text"],
 ];
 
