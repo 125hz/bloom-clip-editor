@@ -236,20 +236,23 @@
           <input type="checkbox" id="mb-enable">
         </label>
         <div id="mb-settings" hidden>
+        <div class="settings-section"><span>blur</span></div>
         <label class="field row">
           <span>render method</span>
           <select id="mb-method">
-            <option value="fast" selected>fast (frame blend)</option>
-            <option value="interpolate">quality (interpolated, slow)</option>
+            <option value="rife" selected>quality (RIFE GPU)</option>
+            <option value="balanced">balanced (motion comp, CPU)</option>
+            <option value="interpolate">quality (FFmpeg, slow)</option>
+            <option value="fast">fast (frame blend)</option>
           </select>
         </label>
         <label class="field">
           <span>blur amount <em id="mb-amount-val">1</em></span>
           <input type="range" id="mb-amount" min="0" max="2" step="0.05" value="1">
         </label>
-        <label class="field row">
+        <label class="field row" id="mb-interp-row">
           <span>interpolated fps</span>
-          <span><input id="mb-interp" type="number" value="480" min="60" max="1920" step="30" class="inline-num"> fps</span>
+          <span><input id="mb-interp" type="number" value="300" min="60" max="1920" step="30" class="inline-num"> fps</span>
         </label>
         <label class="field row">
           <span>frame weighting</span>
@@ -260,36 +263,77 @@
             <option value="vegas">vegas</option>
           </select>
         </label>
-        <label class="field">
-          <span>brightness <em id="mb-brightness-val">1</em></span>
-          <input type="range" id="mb-brightness" min="0" max="2" step="0.05" value="1">
+        <div class="settings-section"><span>color grading</span></div>
+        <div class="blur-color-row">
+          <div class="blur-color-sliders">
+            <label class="field">
+              <span>brightness <em id="mb-brightness-val">1</em></span>
+              <input type="range" id="mb-brightness" min="0" max="2" step="0.05" value="1">
+            </label>
+            <label class="field">
+              <span>saturation <em id="mb-saturation-val">1</em></span>
+              <input type="range" id="mb-saturation" min="0" max="3" step="0.05" value="1">
+            </label>
+            <label class="field">
+              <span>contrast <em id="mb-contrast-val">1</em></span>
+              <input type="range" id="mb-contrast" min="0" max="2" step="0.05" value="1">
+            </label>
+            <label class="field">
+              <span>gamma <em id="mb-gamma-val">1</em></span>
+              <input type="range" id="mb-gamma" min="0.1" max="3" step="0.05" value="1">
+            </label>
+          </div>
+          <div class="blur-color-preview">
+            <canvas id="mb-color-preview" width="640" height="360" aria-label="final render color preview"></canvas>
+            <svg class="blur-preview-filter" aria-hidden="true">
+              <filter id="mb-color-filter" color-interpolation-filters="sRGB">
+                <feComponentTransfer>
+                  <feFuncR id="mb-linear-r" type="linear" slope="1" intercept="0"/>
+                  <feFuncG id="mb-linear-g" type="linear" slope="1" intercept="0"/>
+                  <feFuncB id="mb-linear-b" type="linear" slope="1" intercept="0"/>
+                </feComponentTransfer>
+                <feColorMatrix id="mb-saturation-filter" type="saturate" values="1"/>
+                <feComponentTransfer>
+                  <feFuncR id="mb-gamma-r" type="gamma" amplitude="1" exponent="1" offset="0"/>
+                  <feFuncG id="mb-gamma-g" type="gamma" amplitude="1" exponent="1" offset="0"/>
+                  <feFuncB id="mb-gamma-b" type="gamma" amplitude="1" exponent="1" offset="0"/>
+                </feComponentTransfer>
+              </filter>
+            </svg>
+            <span>live final-color preview</span>
+          </div>
+        </div>
+        <div class="settings-section"><span>mask &amp; performance</span></div>
+        <div class="field row">
+          <span>blur mask</span>
+          <span class="row-actions">
+            <em id="mb-mask-status" class="mask-status">none</em>
+            <button class="tbtn small" id="mb-mask-edit">edit mask</button>
+          </span>
+        </div>
+        <label class="field row">
+          <span>gpu threads (RIFE)</span>
+          <select id="mb-gpu-threads">
+            <option value="0" selected>auto (recommended)</option>
+            <option value="1">1</option>
+            <option value="2">2 (needs 6GB+ VRAM)</option>
+          </select>
         </label>
-        <label class="field">
-          <span>saturation <em id="mb-saturation-val">1</em></span>
-          <input type="range" id="mb-saturation" min="0" max="3" step="0.05" value="1">
-        </label>
-        <label class="field">
-          <span>contrast <em id="mb-contrast-val">1</em></span>
-          <input type="range" id="mb-contrast" min="0" max="2" step="0.05" value="1">
-        </label>
-        <label class="field">
-          <span>gamma <em id="mb-gamma-val">1</em></span>
-          <input type="range" id="mb-gamma" min="0.1" max="3" step="0.05" value="1">
-        </label>
+        <div class="dim note" id="mb-gpu-hint"></div>
 
         <div class="settings-section"><span>blur presets</span></div>
         <div class="field row">
           <select id="mb-preset-select" style="flex:1"><option value="">(none)</option></select>
           <button class="tbtn small" id="mb-preset-default">set default</button>
           <button class="tbtn small" id="mb-preset-delete">delete</button>
+          <button class="tbtn small" id="mb-preset-update" hidden>update preset</button>
         </div>
         <div class="field row">
           <input type="text" id="mb-preset-name" placeholder="preset name" style="flex:1">
           <button class="tbtn small" id="mb-preset-save">save preset</button>
         </div>
         </div>
-        <div class="dim note">applies to preset and custom exports when enabled &middot; the exported
-          fps comes from the render settings</div>
+        <div class="dim note">higher interpolated fps = smoother, stronger blur (slower render) &middot; the exported fps comes from the render settings</div>
       </div>
 
       <label class="field row" id="export-range-row" hidden>
@@ -307,6 +351,10 @@
           <option value="stretch">stretch to fill frame</option>
         </select>
       </label>
+      <label class="field row">
+        <span>copy finished video to clipboard</span>
+        <input type="checkbox" id="export-copy" checked>
+      </label>
 
       <div class="modal-footer">
         <span class="dim">duration <b id="export-duration">0:00</b></span>
@@ -318,6 +366,7 @@
   <!-- export progress overlay -->
   <div id="progress-overlay" class="overlay" hidden>
     <div class="modal">
+      <div class="modal-header"><span id="export-state-title">exporting</span></div>
       <canvas id="export-preview-canvas" width="560" height="315"></canvas>
       <div class="progress-track"><div id="export-fill"></div></div>
       <div class="progress-stats">
@@ -325,7 +374,55 @@
         <span id="export-frames">frame 0 / 0</span>
         <span id="export-eta">eta --:--</span>
       </div>
-      <button class="tbtn" id="cancel-export">cancel</button>
+      <div id="export-stage" class="dim note">preparing...</div>
+      <div id="export-result-message" class="export-result-message" hidden></div>
+      <div class="export-actions" id="export-active-actions">
+        <button class="tbtn primary" id="finish-export">stop &amp; finish file</button>
+        <button class="tbtn" id="cancel-export">cancel &amp; delete</button>
+      </div>
+      <div class="export-actions" id="export-complete-actions" hidden>
+        <button class="tbtn primary" id="open-export-folder">open file location</button>
+        <button class="tbtn" id="close-export-result">close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- blur mask editor -->
+  <div id="mask-modal" class="overlay" hidden>
+    <div class="modal mask-modal">
+      <div class="modal-header">
+        <span>blur mask &mdash; paint where motion blur should NOT apply (HUD, crosshair, ...)</span>
+        <button class="tbtn small" id="mask-close">x</button>
+      </div>
+      <canvas id="mask-canvas" width="1280" height="720"></canvas>
+      <div class="field-grid mask-tools">
+        <label class="field">
+          <span>brush size <em id="mask-brush-val">40</em></span>
+          <input type="range" id="mask-brush" min="4" max="240" step="2" value="40">
+        </label>
+        <label class="field">
+          <span>feather <em id="mask-feather-val">24</em></span>
+          <input type="range" id="mask-feather" min="0" max="120" step="2" value="24">
+        </label>
+        <div class="field">
+          <span>tool</span>
+          <div class="export-actions">
+            <button class="tbtn small active" id="mask-paint">paint</button>
+            <button class="tbtn small" id="mask-erase">erase</button>
+            <button class="tbtn small" id="mask-clear">clear</button>
+          </div>
+        </div>
+      </div>
+      <div class="field row">
+        <select id="mask-preset-select" style="flex:1"><option value="">(unsaved mask)</option></select>
+        <input type="text" id="mask-preset-name" placeholder="mask name" style="flex:1">
+        <button class="tbtn small" id="mask-preset-save">save</button>
+        <button class="tbtn small" id="mask-preset-delete">delete</button>
+      </div>
+      <div class="export-actions">
+        <button class="tbtn primary" id="mask-apply">apply mask</button>
+        <button class="tbtn" id="mask-remove">remove mask</button>
+      </div>
     </div>
   </div>
 
@@ -351,7 +448,7 @@
     <div class="modal">
       <div class="modal-header"><span>about</span><button class="tbtn small" id="help-close">x</button></div>
       <div class="about-block">
-        <p>version: 2.1.0</p>
+        <p>version: 2.5</p>
         <p>created by: <a class="ext-link" href="#" data-url="https://x.com/halcyonpalace">@halcyonpalace</a>.</p>
         <p>thanks to: bloom, craig, thomasina</p>
         <p>motion blur forked from <a class="ext-link" href="#" data-url="https://github.com/f0e/blur">https://github.com/f0e/blur</a></p>

@@ -1,13 +1,15 @@
 {
   "name": "bloom-clip-editor",
-  "version": "2.1.0",
+  "version": "2.5.0",
   "description": "A simple clip editor to cut and merge videos quickly",
   "author": "125hz",
   "license": "ISC",
   "scripts": {
     "prepare-ffmpeg": "node scripts/prepare-ffmpeg.mjs",
-    "dev": "npm run prepare-ffmpeg && tauri dev",
-    "build": "npm run prepare-ffmpeg && tauri build",
+    "prepare-vapoursynth": "node scripts/prepare-vapoursynth.mjs",
+    "prepare-runtime": "npm run prepare-ffmpeg && npm run prepare-vapoursynth",
+    "dev": "npm run prepare-runtime && tauri dev",
+    "build": "npm run prepare-runtime && tauri build",
     "tauri": "tauri"
   },
   "devDependencies": {

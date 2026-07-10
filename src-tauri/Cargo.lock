@@ -288,14 +288,16 @@ dependencies = [
 
 [[package]]
 name = "bloom-clip-editor"
-version = "2.1.0"
+version = "2.5.0"
 dependencies = [
+ "base64 0.22.1",
  "serde",
  "serde_json",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",
  "tauri-plugin-opener",
+ "windows",
 ]
 
 [[package]]

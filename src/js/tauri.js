@@ -46,6 +46,11 @@ export function openExternal(url) {
   invoke("plugin:opener|open_url", { url }).catch((e) => console.error("open url:", e));
 }
 
+export async function revealInFolder(path) {
+  // the opener plugin command signature is reveal_item_in_dir(paths: Vec<PathBuf>)
+  return await invoke("plugin:opener|reveal_item_in_dir", { paths: [path] });
+}
+
 export function setWindowTitle(title) {
   try {
     T.window.getCurrentWindow().setTitle(title);

@@ -33,7 +33,9 @@ const SCHEDULE_HORIZON = 1.5; // seconds of audio scheduled ahead
 const PRELOAD_AHEAD = 4; // seconds before a clip starts to preload video
 const POOL_MAX = 8;
 
-// clipId -> { el, lastUsed }
+// clipId -> { el, loopEl, loopTime, lastUsed }. loopEl is a paused second
+// decoder held on the first frame of the loop start, allowing the active
+// decoder to finish the loop without forcing a costly backwards seek.
 const pool = new Map();
 // "clipId:trackOrder" -> { src, fadeGain, volGain, clipId, order }
 const scheduled = new Map();
@@ -68,15 +70,30 @@ function getVideoEl(clip) {
   return entry.el;
 }
 
+function makeVideoEl(clip) {
+  const el = document.createElement("video");
+  el.muted = true;
+  el.playsInline = true;
+  el.preload = "auto";
+  el.src = clip.fileUrl;
+  return el;
+}
+
+function disposeVideoEl(el) {
+  if (!el) return;
+  el.pause();
+  el.removeAttribute("src");
+  el.load();
+}
+
 function evictPool() {
   if (pool.size <= POOL_MAX) return;
   const entries = [...pool.entries()].sort((a, b) => a[1].lastUsed - b[1].lastUsed);
   while (pool.size > POOL_MAX && entries.length) {
     const [id, entry] = entries.shift();
     if (entry.el._active) continue;
-    entry.el.pause();
-    entry.el.removeAttribute("src");
-    entry.el.load();
+    disposeVideoEl(entry.el);
+    disposeVideoEl(entry.loopEl);
     pool.delete(id);
   }
 }
@@ -85,9 +102,8 @@ export function invalidatePool() {
   const live = new Set(state.clips.map((c) => c.id));
   for (const [id, entry] of pool) {
     if (!live.has(id)) {
-      entry.el.pause();
-      entry.el.removeAttribute("src");
-      entry.el.load();
+      disposeVideoEl(entry.el);
+      disposeVideoEl(entry.loopEl);
       pool.delete(id);
     }
   }
@@ -117,6 +133,43 @@ function activeVideoClips(t) {
     if (c) out.push(c);
   }
   return out;
+}
+
+function warmLoopStart() {
+  if (!state.loop) return;
+  for (const c of activeVideoClips(state.loop.start)) {
+    let entry = pool.get(c.id);
+    if (!entry) {
+      getVideoEl(c);
+      entry = pool.get(c.id);
+    }
+    const expected = c.inPoint + (state.loop.start - c.startTime) * (c.speed || 1);
+    // The active decoder may be the same clip seen at the end of the loop,
+    // so it cannot be repositioned early. Keep a separate paused decoder on
+    // the exact loop-start frame instead.
+    if (!entry.loopEl) entry.loopEl = makeVideoEl(c);
+    const el = entry.loopEl;
+    const needsSeek = entry.loopTime !== state.loop.start || Math.abs(el.currentTime - expected) > 0.02;
+    entry.loopTime = state.loop.start;
+    if (el.readyState >= 1 && !el.seeking && needsSeek) {
+      safeSeek(el, expected, c);
+    }
+  }
+}
+
+function promoteLoopWarmup() {
+  if (!state.loop) return;
+  for (const c of activeVideoClips(state.loop.start)) {
+    const entry = pool.get(c.id);
+    if (!entry?.loopEl || entry.loopEl.seeking || entry.loopEl.readyState < 2) continue;
+    const old = entry.el;
+    entry.el = entry.loopEl;
+    entry.loopEl = old;
+    entry.loopTime = null;
+    entry.el._active = true;
+    old._active = false;
+    old.pause(); // don't keep decoding the demoted element in the background
+  }
 }
 
 function upcomingVideoClips(t) {
@@ -154,17 +207,12 @@ function syncVideos(t, playing) {
     }
   }
 
-  // nearing the end of a loop region: warm up the decoders for the clips
-  // visible at the loop start so the wrap doesn't flash black
+  // Nearing the end of a loop region, decode the loop-start frames in a
+  // second video element. This is necessary when the same clip spans both
+  // ends of the loop: one element cannot both keep playing the end and seek
+  // back to the start without a visible decoder stall.
   if (playing && state.loop && t > state.loop.end - PRELOAD_AHEAD && t < state.loop.end) {
-    for (const c of activeVideoClips(state.loop.start)) {
-      const el = getVideoEl(c);
-      if (el._active) continue; // still on screen; can't pre-position it
-      const expected = c.inPoint + (state.loop.start - c.startTime) * (c.speed || 1);
-      if (el.readyState >= 1 && !el.seeking && Math.abs(el.currentTime - expected) > 0.25) {
-        safeSeek(el, expected, c);
-      }
-    }
+    warmLoopStart();
   }
 
   for (const [id, entry] of pool) {
@@ -558,6 +606,7 @@ function tick() {
 
   // loop region: jump back to the start when reaching the end
   if (state.loop && t >= state.loop.end - 0.005) {
+    promoteLoopWarmup();
     seek(state.loop.start);
     t = state.loop.start;
   }
@@ -606,7 +655,10 @@ export function stop() {
   if (rafId) cancelAnimationFrame(rafId);
   rafId = null;
   stopAudio();
-  for (const { el } of pool.values()) el.pause();
+  for (const { el, loopEl } of pool.values()) {
+    el.pause();
+    loopEl?.pause();
+  }
 
   if (state.settings.pauseAtPlayhead) {
     state.anchorTime = state.time;

@@ -1,10 +1,11 @@
 // exportui.js - export presets modal, progress overlay, invoking the
 // Rust single-pass export.
 
-import { invoke, listen, saveExportDialog, messageBox } from "./tauri.js";
+import { invoke, listen, saveExportDialog, messageBox, revealInFolder } from "./tauri.js";
 import { state, emit, contentEnd, clipEnd, layerIndex } from "./state.js";
 import * as player from "./player.js";
 import { formatTimeShort } from "./utils.js";
+import { openMaskEditor, getExportMask } from "./maskeditor.js";
 
 const modal = document.getElementById("export-modal");
 const progressOverlay = document.getElementById("progress-overlay");
@@ -14,6 +15,13 @@ const framesEl = document.getElementById("export-frames");
 const etaEl = document.getElementById("export-eta");
 const exportCanvas = document.getElementById("export-preview-canvas");
 const exportCtx = exportCanvas.getContext("2d");
+const exportStateTitle = document.getElementById("export-state-title");
+const exportStageEl = document.getElementById("export-stage");
+const exportResultMessage = document.getElementById("export-result-message");
+const activeExportActions = document.getElementById("export-active-actions");
+const completeExportActions = document.getElementById("export-complete-actions");
+let lastExportPath = "";
+let finishEarlyRequested = false;
 
 const PRESETS = {
   discord: { width: 1280, height: 720, fps: 60 },
@@ -83,6 +91,7 @@ export function openExportModal() {
   document.querySelector('[data-preset="hq"]').classList.toggle("disabled", !ok120);
 
   updateEstimate();
+  drawBlurColorPreview();
   modal.hidden = false;
 }
 
@@ -166,43 +175,56 @@ const mb = {
   contrastVal: document.getElementById("mb-contrast-val"),
   gamma: document.getElementById("mb-gamma"),
   gammaVal: document.getElementById("mb-gamma-val"),
+  colorPreview: document.getElementById("mb-color-preview"),
   presetSelect: document.getElementById("mb-preset-select"),
   presetName: document.getElementById("mb-preset-name"),
+  presetUpdate: document.getElementById("mb-preset-update"),
 };
 
 const MB_STORE_KEY = "bloom-mb-presets";
 
 function mbSettings() {
-  return {
+  return normalizeMbSettings({
     enabled: mb.enable.checked,
     method: mb.method.value,
-    interpFps: Math.max(60, parseFloat(mb.interp.value) || 480),
+    interpFps: Math.max(60, parseFloat(mb.interp.value) || 300),
     amount: parseFloat(mb.amount.value) || 0,
     weighting: mb.weighting.value,
     brightness: parseFloat(mb.brightness.value),
     saturation: parseFloat(mb.saturation.value),
     contrast: parseFloat(mb.contrast.value),
     gamma: parseFloat(mb.gamma.value),
+  });
+}
+
+function normalizeMbSettings(s = {}) {
+  return {
+    enabled: !!s.enabled,
+    method: s.method || "rife",
+    interpFps: Math.max(60, parseFloat(s.interpFps) || 300),
+    amount: s.amount ?? 1,
+    weighting: s.weighting || "equal",
+    brightness: s.brightness ?? 1,
+    saturation: s.saturation ?? 1,
+    contrast: s.contrast ?? 1,
+    gamma: s.gamma ?? 1,
   };
 }
 
-function mbApply(s) {
+function mbApply(settings) {
+  const s = normalizeMbSettings(settings);
   mb.enable.checked = !!s.enabled;
-  mb.method.value = s.method || "fast";
-  mb.amount.value = s.amount ?? 1;
-  mb.interp.value = s.interpFps ?? 480;
-  mb.weighting.value = s.weighting || "equal";
-  mb.brightness.value = s.brightness ?? 1;
-  mb.saturation.value = s.saturation ?? 1;
-  mb.contrast.value = s.contrast ?? 1;
-  mb.gamma.value = s.gamma ?? 1;
+  mb.method.value = s.method;
+  mb.amount.value = s.amount;
+  mb.interp.value = s.interpFps;
+  mb.weighting.value = s.weighting;
+  mb.brightness.value = s.brightness;
+  mb.saturation.value = s.saturation;
+  mb.contrast.value = s.contrast;
+  mb.gamma.value = s.gamma;
   mb.settings.hidden = !mb.enable.checked;
-  mbSyncLabels();
+  mbControlChanged();
 }
-
-mb.enable.addEventListener("change", () => {
-  mb.settings.hidden = !mb.enable.checked;
-});
 
 function mbSyncLabels() {
   mb.amountVal.textContent = mb.amount.value;
@@ -211,9 +233,148 @@ function mbSyncLabels() {
   mb.contrastVal.textContent = mb.contrast.value;
   mb.gammaVal.textContent = mb.gamma.value;
 }
-for (const el of [mb.amount, mb.brightness, mb.saturation, mb.contrast, mb.gamma]) {
-  el.addEventListener("input", mbSyncLabels);
+
+function mbSettingsEqual(a, b) {
+  const left = normalizeMbSettings(a);
+  const right = normalizeMbSettings(b);
+  return Object.keys(left).every((key) => left[key] === right[key]);
 }
+
+function mbSyncPresetUpdate() {
+  const name = mb.presetSelect.value;
+  const preset = mbStore().presets[name];
+  mb.presetUpdate.hidden = !preset || mbSettingsEqual(mbSettings(), preset);
+}
+
+// Snapshot of the first frame of the earliest video clip. Used when the
+// playhead sits over empty timeline space, where the main preview is black.
+const fallbackFrame = { key: "", canvas: null };
+
+function videoUnderPlayhead() {
+  return state.clips.some(
+    (c) => c.kind === "video" && state.time >= c.startTime - 1e-3 && state.time < clipEnd(c) - 1e-3
+  );
+}
+
+function firstVideoClip() {
+  let best = null;
+  for (const c of state.clips) {
+    if (c.kind !== "video") continue;
+    if (!best || c.startTime < best.startTime) best = c;
+  }
+  return best;
+}
+
+function loadFallbackFrame(clip) {
+  const key = `${clip.id}:${clip.inPoint || 0}`;
+  if (fallbackFrame.key === key) return fallbackFrame.canvas; // cached (or still loading)
+  fallbackFrame.key = key;
+  fallbackFrame.canvas = null;
+  const v = document.createElement("video");
+  v.muted = true;
+  v.preload = "auto";
+  v.src = clip.fileUrl;
+  v.addEventListener("loadedmetadata", () => {
+    v.currentTime = (clip.inPoint || 0) + 0.01;
+  });
+  v.addEventListener(
+    "seeked",
+    () => {
+      if (fallbackFrame.key !== key) return;
+      const c = document.createElement("canvas");
+      c.width = v.videoWidth || 2;
+      c.height = v.videoHeight || 2;
+      c.getContext("2d").drawImage(v, 0, 0);
+      fallbackFrame.canvas = c;
+      v.removeAttribute("src");
+      v.load();
+      drawBlurColorPreview();
+    },
+    { once: true }
+  );
+  return null;
+}
+
+function previewSourceCanvas() {
+  let source = player.previewCanvas();
+  if (!videoUnderPlayhead()) {
+    const clip = firstVideoClip();
+    if (clip) source = loadFallbackFrame(clip) || source;
+  }
+  return source;
+}
+
+function drawBlurColorPreview() {
+  const canvas = mb.colorPreview;
+  const c = canvas.getContext("2d");
+  const source = previewSourceCanvas();
+  c.fillStyle = "#000";
+  c.fillRect(0, 0, canvas.width, canvas.height);
+  const sw = source.width || 1;
+  const sh = source.height || 1;
+  const s = Math.min(canvas.width / sw, canvas.height / sh);
+  const dw = sw * s;
+  const dh = sh * s;
+  c.drawImage(source, (canvas.width - dw) / 2, (canvas.height - dh) / 2, dw, dh);
+  const { brightness, saturation, contrast, gamma } = mbSettings();
+  const intercept = brightness - 1 + (1 - contrast) / 2;
+  for (const id of ["mb-linear-r", "mb-linear-g", "mb-linear-b"]) {
+    const fn = document.getElementById(id);
+    fn.setAttribute("slope", contrast);
+    fn.setAttribute("intercept", intercept);
+  }
+  document.getElementById("mb-saturation-filter").setAttribute("values", saturation);
+  for (const id of ["mb-gamma-r", "mb-gamma-g", "mb-gamma-b"]) {
+    document.getElementById(id).setAttribute("exponent", 1 / gamma);
+  }
+  // WebView2 can cache SVG filter results; toggling the reference guarantees
+  // an immediate repaint without reading potentially tainted video pixels.
+  canvas.style.filter = "none";
+  void canvas.offsetWidth;
+  canvas.style.filter = "url(#mb-color-filter)";
+}
+
+function mbControlChanged() {
+  mb.settings.hidden = !mb.enable.checked;
+  mbSyncLabels();
+  mbSyncPresetUpdate();
+  drawBlurColorPreview();
+}
+
+for (const el of [
+  mb.enable,
+  mb.method,
+  mb.amount,
+  mb.interp,
+  mb.weighting,
+  mb.brightness,
+  mb.saturation,
+  mb.contrast,
+  mb.gamma,
+]) {
+  el.addEventListener("input", mbControlChanged);
+  el.addEventListener("change", mbControlChanged);
+}
+
+// gpu threads is machine-specific, so it lives outside blur presets
+const gpuSelect = document.getElementById("mb-gpu-threads");
+gpuSelect.value = localStorage.getItem("bloom-gpu-threads") || "0";
+gpuSelect.addEventListener("change", () =>
+  localStorage.setItem("bloom-gpu-threads", gpuSelect.value)
+);
+
+invoke("gpu_info")
+  .then((g) => {
+    const gb = (g.dedicatedBytes || 0) / 1024 ** 3;
+    const vramText = gb >= 0.5 ? `${gb.toFixed(1)} GB dedicated VRAM` : "shared-memory GPU";
+    document.getElementById("mb-gpu-hint").textContent =
+      `detected: ${g.name} (${vramText}) · auto uses ${g.autoThreads} gpu thread${g.autoThreads > 1 ? "s" : ""}`;
+  })
+  .catch(() => {});
+
+document.getElementById("mb-mask-edit").addEventListener("click", () => {
+  openMaskEditor(previewSourceCanvas());
+});
 
 function mbStore() {
   try {
@@ -243,12 +404,14 @@ function mbRefreshPresetList(selected = "") {
     mb.presetSelect.appendChild(opt);
   }
   mb.presetSelect.value = selected;
+  mbSyncPresetUpdate();
 }
 
 mb.presetSelect.addEventListener("change", () => {
   const store = mbStore();
   const preset = store.presets[mb.presetSelect.value];
   if (preset) mbApply(preset);
+  else mbSyncPresetUpdate();
 });
 
 document.getElementById("mb-preset-save").addEventListener("click", () => {
@@ -263,6 +426,17 @@ document.getElementById("mb-preset-save").addEventListener("click", () => {
   mb.presetName.value = "";
   mbRefreshPresetList(name);
   emit("status", `saved blur preset "${name}"`);
+});
+
+mb.presetUpdate.addEventListener("click", () => {
+  const name = mb.presetSelect.value;
+  if (!name) return;
+  const store = mbStore();
+  if (!store.presets[name]) return;
+  store.presets[name] = mbSettings();
+  mbSaveStore(store);
+  mbRefreshPresetList(name);
+  emit("status", `updated blur preset "${name}"`);
 });
 
 document.getElementById("mb-preset-delete").addEventListener("click", () => {
@@ -293,7 +467,7 @@ document.getElementById("mb-preset-default").addEventListener("click", () => {
     mbRefreshPresetList(store.default);
   } else {
     mbRefreshPresetList();
-    mbSyncLabels();
+    mbControlChanged();
   }
 }
 
@@ -423,6 +597,8 @@ async function runExport(opts) {
 
   const outPath = await saveExportDialog();
   if (!outPath) return;
+  lastExportPath = outPath;
+  finishEarlyRequested = false;
 
   modal.hidden = true;
   player.stop();
@@ -436,6 +612,15 @@ async function runExport(opts) {
   pctEl.textContent = "0%";
   framesEl.textContent = "starting...";
   etaEl.textContent = "eta --:--";
+  exportStateTitle.textContent = "exporting";
+  exportStageEl.textContent = "preparing...";
+  exportStageEl.hidden = false;
+  exportResultMessage.hidden = true;
+  exportResultMessage.textContent = "";
+  activeExportActions.hidden = false;
+  completeExportActions.hidden = true;
+  document.getElementById("finish-export").disabled = false;
+  document.getElementById("finish-export").textContent = "stop & finish file";
   previewOffset = range ? range.start : 0;
   player.drawAtTime(previewOffset);
   exportCtx.drawImage(player.previewCanvas(), 0, 0, exportCanvas.width, exportCanvas.height);
@@ -453,14 +638,45 @@ async function runExport(opts) {
         targetSizeBytes: opts.targetSizeBytes || 0,
         crf: opts.crf,
         stretch: !!opts.stretch,
-        motionBlur: mb.enable.checked ? mbSettings() : null,
+        motionBlur: mb.enable.checked
+          ? {
+              ...mbSettings(),
+              gpuThreads: parseInt(gpuSelect.value) || 0,
+              maskPng: getExportMask(),
+            }
+          : null,
       },
     });
+    let copied = false;
+    let clipboardFailed = false;
+    if (document.getElementById("export-copy").checked) {
+      try {
+        await invoke("copy_file_to_clipboard", { path: outPath });
+        copied = true;
+        emit("status", "exported video copied to clipboard");
+      } catch (err) {
+        clipboardFailed = true;
+        console.error("copy exported video to clipboard failed:", err);
+        emit("status", "exported video, but clipboard copy failed");
+      }
+    }
     fill.style.width = "100%";
     pctEl.textContent = "100%";
-    framesEl.textContent = "done";
+    framesEl.textContent = finishEarlyRequested ? "partial file finished" : "done";
     etaEl.textContent = "";
-    setTimeout(() => (progressOverlay.hidden = true), 1200);
+    exportStateTitle.textContent = finishEarlyRequested ? "partial export complete" : "export complete";
+    const parts = [
+      finishEarlyRequested
+        ? "render was stopped - completed portion saved."
+        : "exported successfully.",
+    ];
+    if (copied) parts.push("video was copied to your clipboard.");
+    else if (clipboardFailed) parts.push("file saved, but it could not be copied to the clipboard.");
+    exportResultMessage.textContent = parts.join(" ");
+    exportResultMessage.hidden = false;
+    exportStageEl.hidden = true;
+    activeExportActions.hidden = true;
+    completeExportActions.hidden = false;
   } catch (err) {
     progressOverlay.hidden = true;
     if (String(err) !== "cancelled") {
@@ -479,6 +695,28 @@ document.getElementById("cancel-export").addEventListener("click", () => {
   invoke("cancel_export").catch(() => {});
 });
 
+document.getElementById("finish-export").addEventListener("click", () => {
+  finishEarlyRequested = true;
+  framesEl.textContent = "stopping and finalizing file...";
+  etaEl.textContent = "";
+  const button = document.getElementById("finish-export");
+  button.disabled = true;
+  button.textContent = "finishing...";
+  invoke("finish_export").catch(() => {});
+});
+
+document.getElementById("open-export-folder").addEventListener("click", () => {
+  if (!lastExportPath) return;
+  revealInFolder(lastExportPath).catch((err) => {
+    console.error("reveal export:", err);
+    emit("status", "could not open the exported file's location");
+  });
+});
+
+document.getElementById("close-export-result").addEventListener("click", () => {
+  progressOverlay.hidden = true;
+});
+
 // -------------------- progress events --------------------
 
 listen("export-progress", (event) => {
@@ -489,7 +727,8 @@ listen("export-progress", (event) => {
   const speed = p.speed && p.speed !== "N/A" ? ` · ${p.speed}` : "";
   framesEl.textContent = `frame ${p.currentFrame || 0} / ${p.totalFrames || 0}${speed}`;
   const eta = Math.max(0, Math.round(p.etaSeconds || 0));
-  etaEl.textContent = `eta ${Math.floor(eta / 60)}:${String(eta % 60).padStart(2, "0")}`;
+  etaEl.textContent = eta > 0 ? `eta ${Math.floor(eta / 60)}:${String(eta % 60).padStart(2, "0")}` : "eta --:--";
+  if (p.stage) exportStageEl.textContent = p.stage;
 
   // live preview of the frame being rendered (throttled).
   // copy the canvas FIRST (it holds the last completed seek), then kick off

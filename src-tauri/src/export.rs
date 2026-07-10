@@ -11,18 +11,26 @@
 
 use serde::{Deserialize, Serialize};
 use std::fmt::Write as _;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Write as IoWrite};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Mutex;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
+
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 use crate::ffmpeg;
 
 #[derive(Default)]
 pub struct ExportState {
     pub cancelled: AtomicBool,
+    pub finish_requested: AtomicBool,
     pub child_pid: AtomicU32,
+    pub worker_pid: AtomicU32,
     pub running: Mutex<()>,
 }
 
@@ -131,14 +139,14 @@ pub struct ExportClip {
 }
 
 fn default_interp_fps() -> f64 {
-    480.0
+    300.0
 }
 
 /// Motion blur inspired by f0e/blur: interpolate to a high framerate, blend a
 /// window of interpolated frames per output frame, then sample down to the
 /// export fps chosen in the render settings.
 fn default_method() -> String {
-    "fast".into()
+    "rife".into()
 }
 
 #[derive(Deserialize, Clone)]
@@ -167,9 +175,15 @@ pub struct MotionBlur {
     pub contrast: f64,
     #[serde(default = "default_one")]
     pub gamma: f64,
+    /// RIFE gpu_thread override; 0 = auto-detect from VRAM
+    #[serde(default)]
+    pub gpu_threads: u32,
+    /// grayscale mask PNG (base64, no data: prefix); white = keep sharp
+    #[serde(default)]
+    pub mask_png: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct ExportPayload {
     pub clips: Vec<ExportClip>,
@@ -227,6 +241,8 @@ struct ProgressEvent {
     eta_seconds: f64,
     /// ffmpeg's encoding speed string, e.g. "0.85x"
     speed: String,
+    /// what the exporter is currently doing, shown under the frame counter
+    stage: String,
 }
 
 fn f(v: f64) -> String {
@@ -300,6 +316,7 @@ fn encode_settings(p: &ExportPayload, total: f64) -> EncodeSettings {
             s.video_bitrate = Some(18_000_000);
             s.audio_bitrate = "320k";
         }
+        "rife-intermediate" => s.preset = "ultrafast",
         _ => {}
     }
 
@@ -319,6 +336,83 @@ fn encode_settings(p: &ExportPayload, total: f64) -> EncodeSettings {
         s.video_bitrate = Some(v as u64);
     }
     s
+}
+
+/// blur-style color multipliers (1 = neutral) -> an ffmpeg eq filter, or None
+/// when every control sits at neutral.
+fn eq_filter(mb: &MotionBlur) -> Option<String> {
+    let brightness = (mb.brightness - 1.0).clamp(-1.0, 1.0);
+    let saturation = mb.saturation.clamp(0.0, 3.0);
+    let contrast = mb.contrast.clamp(-2.0, 2.0);
+    let gamma = mb.gamma.clamp(0.1, 10.0);
+    if brightness.abs() > 1e-3
+        || (saturation - 1.0).abs() > 1e-3
+        || (contrast - 1.0).abs() > 1e-3
+        || (gamma - 1.0).abs() > 1e-3
+    {
+        Some(format!(
+            "eq=brightness={brightness:.4}:saturation={saturation:.4}:contrast={contrast:.4}:gamma={gamma:.4}"
+        ))
+    } else {
+        None
+    }
+}
+
+/// Decode the user's painted blur mask (white = protected from blur) into a
+/// PNG file inside the build dir. Returns None when no mask is set.
+fn write_mask_png(
+    mb: &MotionBlur,
+    build_dir: &std::path::Path,
+) -> Result<Option<std::path::PathBuf>, String> {
+    let Some(data) = mb.mask_png.as_deref().filter(|s| !s.is_empty()) else {
+        return Ok(None);
+    };
+    use base64::Engine as _;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(data)
+        .map_err(|e| format!("blur mask decode: {e}"))?;
+    let path = build_dir.join("blur-mask.png");
+    std::fs::write(&path, bytes).map_err(|e| format!("blur mask: {e}"))?;
+    Ok(Some(path))
+}
+
+/// Name and dedicated VRAM of the strongest (non-software) display adapter.
+#[cfg(windows)]
+pub fn gpu_adapter_info() -> Option<(String, u64)> {
+    use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIFactory1, DXGI_ADAPTER_FLAG_SOFTWARE};
+    unsafe {
+        let factory = CreateDXGIFactory1::<IDXGIFactory1>().ok()?;
+        let mut best: Option<(String, u64)> = None;
+        let mut i = 0;
+        while let Ok(adapter) = factory.EnumAdapters1(i) {
+            if let Ok(desc) = adapter.GetDesc1() {
+                let vram = desc.DedicatedVideoMemory as u64;
+                let software = desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32 != 0;
+                if !software && best.as_ref().is_none_or(|(_, b)| vram > *b) {
+                    let name = String::from_utf16_lossy(&desc.Description);
+                    best = Some((name.trim_end_matches('\0').trim().to_string(), vram));
+                }
+            }
+            i += 1;
+        }
+        best
+    }
+}
+
+#[cfg(not(windows))]
+pub fn gpu_adapter_info() -> Option<(String, u64)> {
+    None
+}
+
+/// RIFE gpu_thread choice. A second in-flight inference only helps when the
+/// GPU has dedicated VRAM to spare — on iGPUs it overcommits video memory and
+/// throughput collapses by orders of magnitude. Auto picks 2 when the
+/// strongest adapter has >= 6 GiB of dedicated VRAM, otherwise 1.
+pub fn detect_gpu_threads() -> u32 {
+    match gpu_adapter_info() {
+        Some((_, vram)) if vram >= 6 * 1024 * 1024 * 1024 => 2,
+        _ => 1,
+    }
 }
 
 /// Per-clip ffmpeg input: (input index, input seek offset).
@@ -342,19 +436,21 @@ pub fn plan_inputs(p: &ExportPayload) -> ClipInputs {
     out
 }
 
-/// Build the full filter graph.
+/// Build the full filter graph. `mask_input` is the ffmpeg input index of the
+/// looped blur-mask PNG, when one is set.
 fn build_filter_graph(
     p: &ExportPayload,
     clip_inputs: &ClipInputs,
     total: f64,
     build_dir: &std::path::Path,
+    mask_input: Option<usize>,
 ) -> Result<String, String> {
     let (w, h, fps) = (p.width, p.height, p.fps);
     let mb_active = p.motion_blur.as_ref().filter(|m| m.enabled);
     // "fast" motion blur runs the whole graph at the interpolated rate and
     // blends real frames — no motion estimation, so it renders far quicker
     let gfps = match mb_active {
-        Some(m) if m.method != "interpolate" => m.interp_fps.clamp(fps, 960.0),
+        Some(m) if m.method == "fast" => m.interp_fps.clamp(fps, 960.0),
         _ => fps,
     };
     let mut g = String::new();
@@ -495,7 +591,88 @@ pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:color=black@0.0"
         prev = out;
     }
 
-    // ---- text overlays ----
+    // ---- motion blur (high-rate frame blend -> output fps) ----
+    // Text is burned in *after* this stage: minterpolate (and RIFE) warp the
+    // edges of static overlays with motion from the scene behind them, which
+    // made exported text look fatter/ghosted compared with the preview.
+    if let Some(mb) = mb_active.filter(|m| matches!(m.method.as_str(), "fast" | "interpolate")) {
+        let amount = mb.amount.clamp(0.0, 4.0);
+        let mut blur = String::new();
+        if mb.method == "interpolate" {
+            // f0e/blur follows this same shape: create a modest high-FPS
+            // stream, blend a short weighted window, then sample to output
+            // FPS. The simpler OBMC settings avoid the extremely expensive
+            // variable-size adaptive blocks while retaining bidirectional
+            // motion-compensated interpolation.
+            let interp = mb.interp_fps.clamp(fps, 1920.0);
+            let mut frames = ((((interp / fps) * amount).round() as i64).clamp(2, 127)) as usize;
+            if frames % 2 == 0 {
+                frames += 1;
+            }
+            write!(
+                blur,
+                "minterpolate=fps={}:mi_mode=mci:mc_mode=obmc:me_mode=bidir:vsbmc=0:mb_size=16:search_param=12,\
+tmix=frames={frames}:weights='{}',fps={fps},",
+                f(interp),
+                blend_weights(&mb.weighting, frames)
+            )
+            .unwrap();
+        } else {
+            // fast: the graph already runs at gfps — just blend and sample down
+            let mut frames = ((((gfps / fps) * amount).round() as i64).clamp(2, 127)) as usize;
+            if frames % 2 == 0 {
+                frames += 1;
+            }
+            write!(
+                blur,
+                "tmix=frames={frames}:weights='{}',fps={fps},",
+                blend_weights(&mb.weighting, frames)
+            )
+            .unwrap();
+        }
+        if let Some(mi) = mask_input {
+            // painted mask areas keep the sharp (pre-blur) pixels; the mask
+            // PNG comes pre-feathered from the editor so the seam is soft
+            writeln!(g, "[{prev}]split=2[mbsrc][mbsharp];").unwrap();
+            writeln!(g, "[mbsrc]{blur}null[mbout];").unwrap();
+            writeln!(g, "[mbsharp]fps={fps},format=yuva420p[mbsharpf];").unwrap();
+            writeln!(g, "[{mi}:v]fps={fps},scale={w}:{h},format=gray[mbmask];").unwrap();
+            writeln!(g, "[mbsharpf][mbmask]alphamerge[mbsharpa];").unwrap();
+            writeln!(g, "[mbout][mbsharpa]overlay=0:0:eof_action=pass[mbmerged];").unwrap();
+            prev = "mbmerged".to_string();
+        } else {
+            writeln!(g, "[{prev}]{blur}null[mbout];").unwrap();
+            prev = "mbout".to_string();
+        }
+        // color controls apply to the merged result, like the preview shows
+        if let Some(eq) = eq_filter(mb) {
+            writeln!(g, "[{prev}]{eq}[mbeq];").unwrap();
+            prev = "mbeq".to_string();
+        }
+    }
+
+    // ---- text overlays (after blur so static text stays crisp) ----
+    append_text_overlays(&mut g, &mut prev, p, total, fps, build_dir)?;
+
+    writeln!(g, "[{prev}]format=yuv420p[vout];").unwrap();
+
+    // ---- audio ----
+    build_audio_graph(&mut g, p, clip_inputs);
+
+    Ok(g)
+}
+
+/// Burn text clips into `prev` with drawtext (one per line / glyph), matching
+/// the canvas preview's layout. Runs at the output fps, after any motion blur.
+fn append_text_overlays(
+    g: &mut String,
+    prev: &mut String,
+    p: &ExportPayload,
+    total: f64,
+    fps: f64,
+    build_dir: &std::path::Path,
+) -> Result<(), String> {
+    let (w, h) = (p.width, p.height);
     let mut text_clips: Vec<&ExportClip> = p
         .clips
         .iter()
@@ -574,11 +751,21 @@ pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:color=black@0.0"
             let file_name = format!("{name}.txt");
             std::fs::write(build_dir.join(&file_name), text.as_bytes())
                 .map_err(|e| format!("failed to write text file: {e}"))?;
+            // no_hinting: browsers render large text unhinted; freetype's
+            // default hinting snaps stems to the pixel grid, which fattens
+            // and reshapes glyphs compared with the editor preview.
+            // Align against the font's line metrics, not the current text's
+            // glyph bounds. Letter-spaced text is emitted one glyph at a time;
+            // text_h/ascent/descent therefore vary for "t", "e", etc. and
+            // would give each character a different baseline. `y_align=font`
+            // makes y the top of one shared, font-defined line box. A canvas
+            // `middle` baseline likewise centers the font's em box at line_cy.
             let mut dt = format!(
                 "[{prev}]drawtext=textfile={}:fontfile={}:fontsize={}:fontcolor={font_color}:\
-x={center_x}-text_w/2:y={center_y}-text_h/2",
+ft_load_flags=no_hinting:y_align=font:x={center_x}-text_w/2:y={center_y}-{}/2",
                 q(&file_name),
                 q(&font_path),
+                size_px,
                 size_px,
             );
             if border_px >= 1.0 {
@@ -662,13 +849,13 @@ x={center_x}-text_w/2:y={center_y}-text_h/2",
             // transparent full-length layer, blur it, overlay under the text
             writeln!(
                 g,
-                "color=c=black@0.0:s={w}x{h}:r={gfps}:d={},format=yuva420p[tsb{i}];",
+                "color=c=black@0.0:s={w}x{h}:r={fps}:d={},format=yuva420p[tsb{i}];",
                 f(total)
             )
             .unwrap();
             let mut sh_prev = format!("tsb{i}");
             emit_block(
-                &mut g,
+                g,
                 &mut sh_prev,
                 &format!("tsd{i}"),
                 shadow_x_px as f64,
@@ -684,15 +871,15 @@ x={center_x}-text_w/2:y={center_y}-text_h/2",
             )
             .unwrap();
             writeln!(g, "[{prev}][tsg{i}]overlay=0:0:eof_action=pass[tso{i}];").unwrap();
-            prev = format!("tso{i}");
+            *prev = format!("tso{i}");
         }
 
         let font_color = color_hex(&t.color, "ffffff");
         let border_color = color_hex(&t.outline_color, "000000");
         let inline_shadow = has_shadow && shadow_blur_px < 0.5;
         emit_block(
-            &mut g,
-            &mut prev,
+            g,
+            prev,
             &format!("vtx{i}"),
             0.0,
             0.0,
@@ -701,53 +888,11 @@ x={center_x}-text_w/2:y={center_y}-text_h/2",
             inline_shadow,
         )?;
     }
+    Ok(())
+}
 
-    // ---- motion blur (high-rate frame blend -> output fps) ----
-    let mut tail = String::new();
-    if let Some(mb) = mb_active {
-        let amount = mb.amount.clamp(0.0, 4.0);
-        if mb.method == "interpolate" {
-            // quality: motion-estimated interpolation, then blend
-            let interp = mb.interp_fps.clamp(fps, 1920.0);
-            let frames = ((((interp / fps) * amount).round() as i64).clamp(2, 128)) as usize;
-            write!(
-                tail,
-                "minterpolate=fps={}:mi_mode=mci:mc_mode=aobmc:me_mode=bidir:vsbmc=1,\
-tmix=frames={frames}:weights='{}',fps={fps},",
-                f(interp),
-                blend_weights(&mb.weighting, frames)
-            )
-            .unwrap();
-        } else {
-            // fast: the graph already runs at gfps — just blend and sample down
-            let frames = ((((gfps / fps) * amount).round() as i64).clamp(2, 128)) as usize;
-            write!(
-                tail,
-                "tmix=frames={frames}:weights='{}',fps={fps},",
-                blend_weights(&mb.weighting, frames)
-            )
-            .unwrap();
-        }
-        // blur-style multipliers (1 = neutral); eq brightness is additive
-        let brightness = (mb.brightness - 1.0).clamp(-1.0, 1.0);
-        let saturation = mb.saturation.clamp(0.0, 3.0);
-        let contrast = mb.contrast.clamp(-2.0, 2.0);
-        let gamma = mb.gamma.clamp(0.1, 10.0);
-        if brightness.abs() > 1e-3
-            || (saturation - 1.0).abs() > 1e-3
-            || (contrast - 1.0).abs() > 1e-3
-            || (gamma - 1.0).abs() > 1e-3
-        {
-            write!(
-                tail,
-                "eq=brightness={brightness:.4}:saturation={saturation:.4}:contrast={contrast:.4}:gamma={gamma:.4},"
-            )
-            .unwrap();
-        }
-    }
-    writeln!(g, "[{prev}]{tail}format=yuv420p[vout];").unwrap();
-
-    // ---- audio ----
+/// Trim/fade/delay every enabled audio track and mix them into [aout].
+fn build_audio_graph(g: &mut String, p: &ExportPayload, clip_inputs: &ClipInputs) {
     let mut audio_labels: Vec<String> = Vec::new();
     let mut an = 0usize;
     for (ci, c) in p
@@ -807,8 +952,6 @@ tmix=frames={frames}:weights='{}',fps={fps},",
         .unwrap();
         writeln!(g, "[amixed]aformat=channel_layouts=stereo:sample_rates=48000[aout]").unwrap();
     }
-
-    Ok(g)
 }
 
 #[cfg(test)]
@@ -873,12 +1016,16 @@ mod tests {
                 saturation: 1.1,
                 contrast: 1.0,
                 gamma: 1.0,
+                gpu_threads: 0,
+                mask_png: None,
             }),
         };
         let inputs = plan_inputs(&p);
         let dir = std::env::temp_dir().join("bloom-graph-test");
         std::fs::create_dir_all(&dir).unwrap();
-        let g = build_filter_graph(&p, &inputs, 4.0, &dir).unwrap();
+        let g = build_filter_graph(&p, &inputs, 4.0, &dir, None).unwrap();
+        assert!(g.contains("y_align=font"));
+        assert!(!g.contains("(ascent+descent)"));
         std::fs::write(dir.join("filter.txt"), &g).unwrap();
         let mut args = String::new();
         for (c, input) in p.clips.iter().zip(&inputs) {
@@ -898,6 +1045,8 @@ pub fn run_export(app: &AppHandle, state: &ExportState, p: ExportPayload) -> Res
         .try_lock()
         .map_err(|_| "an export is already running".to_string())?;
     state.cancelled.store(false, Ordering::SeqCst);
+    state.finish_requested.store(false, Ordering::SeqCst);
+    state.worker_pid.store(0, Ordering::SeqCst);
 
     if p.clips.is_empty() {
         return Err("no clips to export".into());
@@ -920,9 +1069,14 @@ pub fn run_export(app: &AppHandle, state: &ExportState, p: ExportPayload) -> Res
     ));
     std::fs::create_dir_all(&build_dir).map_err(|e| format!("temp dir: {e}"))?;
 
-    let result = run_export_inner(app, state, &p, total, &build_dir);
+    let result = run_export_inner(app, state, &p, total, &build_dir, 0.0, 1.0, "encoding video");
+    // best-effort: a stopped-early file otherwise ends with frozen video
+    if result.is_ok() && state.finish_requested.load(Ordering::SeqCst) {
+        let _ = trim_frozen_tail(&p.out_path);
+    }
     let _ = std::fs::remove_dir_all(&build_dir);
     state.child_pid.store(0, Ordering::SeqCst);
+    state.worker_pid.store(0, Ordering::SeqCst);
     result
 }
 
@@ -932,10 +1086,31 @@ fn run_export_inner(
     p: &ExportPayload,
     total: f64,
     build_dir: &std::path::Path,
+    progress_base: f64,
+    progress_span: f64,
+    stage: &str,
 ) -> Result<(), String> {
+    if p
+        .motion_blur
+        .as_ref()
+        .is_some_and(|m| m.enabled && matches!(m.method.as_str(), "rife" | "balanced"))
+    {
+        return run_rife_export(app, state, p, total, build_dir, progress_base, progress_span);
+    }
     // one pre-seeked input per media clip; input 0 is the silent audio base
     let clip_inputs = plan_inputs(p);
-    let graph = build_filter_graph(p, &clip_inputs, total, build_dir)?;
+    let mask_path = match p
+        .motion_blur
+        .as_ref()
+        .filter(|m| m.enabled && matches!(m.method.as_str(), "fast" | "interpolate"))
+    {
+        Some(m) => write_mask_png(m, build_dir)?,
+        None => None,
+    };
+    let mask_input = mask_path
+        .as_ref()
+        .map(|_| 1 + clip_inputs.iter().flatten().count());
+    let graph = build_filter_graph(p, &clip_inputs, total, build_dir, mask_input)?;
     let filter_path = build_dir.join("filter.txt");
     std::fs::write(&filter_path, &graph).map_err(|e| format!("filter file: {e}"))?;
 
@@ -960,6 +1135,10 @@ fn run_export_inner(
         let read_len = (c.in_point - seek) + c.duration * c.speed.clamp(0.05, 4.0) + 2.0;
         cmd.args(["-ss", &f(*seek), "-t", &f(read_len), "-i", &c.file_path]);
     }
+    if let Some(mask) = &mask_path {
+        cmd.args(["-loop", "1", "-t", &f(total), "-i"]);
+        cmd.arg(mask);
+    }
     cmd.args(["-filter_complex_script", "filter.txt"]);
     cmd.args(["-map", "[vout]", "-map", "[aout]"]);
     cmd.args(["-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", enc.preset]);
@@ -979,10 +1158,11 @@ fn run_export_inner(
     cmd.args(["-movflags", "+faststart", "-t", &f(total)]);
     cmd.args(["-progress", "pipe:1"]);
     cmd.arg(&p.out_path);
-    cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).stdin(Stdio::null());
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).stdin(Stdio::piped());
 
     let mut child = cmd.spawn().map_err(|e| format!("failed to start ffmpeg: {e}"))?;
     state.child_pid.store(child.id(), Ordering::SeqCst);
+    let mut child_stdin = child.stdin.take();
 
     // collect stderr on a thread for error reporting
     let stderr = child.stderr.take();
@@ -1005,9 +1185,17 @@ fn run_export_inner(
     if let Some(out) = child.stdout.take() {
         let mut current_frame: u64 = 0;
         let mut speed = String::new();
+        let mut finish_sent = false;
         for line in BufReader::new(out).lines().map_while(Result::ok) {
             if state.cancelled.load(Ordering::SeqCst) {
                 break;
+            }
+            if state.finish_requested.load(Ordering::SeqCst) && !finish_sent {
+                if let Some(stdin) = child_stdin.as_mut() {
+                    let _ = stdin.write_all(b"q\n");
+                    let _ = stdin.flush();
+                }
+                finish_sent = true;
             }
             if let Some(v) = line.strip_prefix("frame=") {
                 current_frame = v.trim().parse().unwrap_or(current_frame);
@@ -1016,18 +1204,25 @@ fn run_export_inner(
             } else if let Some(v) = line.strip_prefix("out_time_us=") {
                 let secs = v.trim().parse::<f64>().unwrap_or(0.0) / 1_000_000.0;
                 let pct = (secs / total).clamp(0.0, 1.0);
+                // With minterpolate, ffmpeg can keep reporting frame=0 while
+                // it buffers the optical-flow window. out_time_us continues
+                // to advance, so derive a monotonic output-frame estimate for
+                // the UI until ffmpeg reports a concrete frame number.
+                let time_frame = (secs * p.fps).floor().max(0.0) as u64;
+                current_frame = current_frame.max(time_frame.min(total_frames));
                 let elapsed = started.elapsed().as_secs_f64();
                 let eta = if pct > 0.02 { elapsed / pct - elapsed } else { 0.0 };
                 let _ = app.emit(
                     "export-progress",
                     ProgressEvent {
-                        percent: pct,
+                        percent: progress_base + pct * progress_span,
                         current_seconds: secs,
                         total_seconds: total,
                         current_frame,
                         total_frames,
                         eta_seconds: eta.max(0.0),
                         speed: speed.clone(),
+                        stage: stage.to_string(),
                     },
                 );
             }
@@ -1061,14 +1256,559 @@ fn run_export_inner(
     let _ = app.emit(
         "export-progress",
         ProgressEvent {
-            percent: 1.0,
+            percent: progress_base + progress_span,
             current_seconds: total,
             total_seconds: total,
             current_frame: total_frames,
             total_frames,
             eta_seconds: 0.0,
             speed: String::new(),
+            stage: stage.to_string(),
         },
     );
+    Ok(())
+}
+
+fn runtime_resource(app: &AppHandle, name: &str) -> Result<std::path::PathBuf, String> {
+    let dev_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(name);
+    if dev_path.exists() {
+        return Ok(dev_path);
+    }
+    app.path()
+        .resource_dir()
+        .map_err(|e| format!("motion blur runtime path: {e}"))
+        .map(|dir| dir.join(name))
+}
+
+fn probe_duration(path: &std::path::Path) -> Result<f64, String> {
+    let mut cmd = ffmpeg::command("ffprobe")?;
+    cmd.args(["-v", "error", "-show_entries", "format=duration", "-of", "default=nw=1:nk=1"]);
+    cmd.arg(path);
+    let value = ffmpeg::run(&mut cmd)?;
+    value.trim().parse::<f64>().map_err(|e| format!("partial export duration: {e}"))
+}
+
+fn probe_video_duration(path: &std::path::Path) -> Result<f64, String> {
+    let mut cmd = ffmpeg::command("ffprobe")?;
+    cmd.args([
+        "-v",
+        "error",
+        "-select_streams",
+        "v:0",
+        "-show_entries",
+        "stream=duration",
+        "-of",
+        "default=nw=1:nk=1",
+    ]);
+    cmd.arg(path);
+    let value = ffmpeg::run(&mut cmd)?;
+    value.trim().parse::<f64>().map_err(|e| format!("video stream duration: {e}"))
+}
+
+/// After "stop & finish" the muxer has usually interleaved audio packets past
+/// the last encoded video frame, so players hold the final frame for the
+/// remaining audio (~half a second). Remux the file trimmed to the video
+/// stream's duration so both streams end together.
+fn trim_frozen_tail(out_path: &str) -> Result<(), String> {
+    let path = std::path::Path::new(out_path);
+    let vdur = probe_video_duration(path)?;
+    if vdur <= 0.1 {
+        return Ok(());
+    }
+    let tmp = path.with_extension("finish.mp4");
+    let mut cmd = ffmpeg::command("ffmpeg")?;
+    cmd.args(["-y", "-hide_banner", "-v", "error", "-i"]);
+    cmd.arg(path);
+    cmd.args(["-t", &f(vdur), "-c", "copy", "-movflags", "+faststart"]);
+    cmd.arg(&tmp);
+    ffmpeg::run(&mut cmd)?;
+    std::fs::remove_file(path).map_err(|e| format!("replace stopped export: {e}"))?;
+    std::fs::rename(&tmp, path).map_err(|e| format!("replace stopped export: {e}"))
+}
+
+/// The interpolated rate RIFE runs at: the user's "interpolated fps" snapped
+/// to a whole multiple of the output fps (so each output frame blends the
+/// same number of interpolated samples), at least 2x, capped at 1920.
+fn rife_interp_fps(mb: &MotionBlur, fps: f64) -> f64 {
+    let mult = (mb.interp_fps.clamp(fps * 2.0, 1920.0) / fps).round().max(2.0);
+    (fps * mult).min(1920.0)
+}
+
+fn rife_weights(mb: &MotionBlur, fps: f64) -> String {
+    let interp = rife_interp_fps(mb, fps);
+    // AverageFrames needs an odd, centered window of at most 31 taps
+    let mut frames = ((interp / fps * mb.amount.clamp(0.0, 4.0)).round() as usize).clamp(1, 31);
+    if frames % 2 == 0 {
+        frames = (frames + 1).min(31);
+    }
+    format!("[{}]", blend_weights(&mb.weighting, frames).replace(' ', ","))
+}
+
+/// Follow an ffmpeg `-progress pipe:1` stream, emitting UI progress events
+/// mapped into [base, base+span]. `on_finish_request` runs on every progress
+/// line while "stop & finish" is pending (e.g. to close the frame source).
+/// One immediate event so the UI can announce a stage before its first
+/// progress line arrives (e.g. while the RIFE runtime warms up).
+fn emit_stage(app: &AppHandle, percent: f64, total: f64, total_frames: u64, stage: &str) {
+    let _ = app.emit(
+        "export-progress",
+        ProgressEvent {
+            percent,
+            current_seconds: 0.0,
+            total_seconds: total,
+            current_frame: 0,
+            total_frames,
+            eta_seconds: 0.0,
+            speed: String::new(),
+            stage: stage.to_string(),
+        },
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn pump_progress(
+    app: &AppHandle,
+    state: &ExportState,
+    out: std::process::ChildStdout,
+    fps: f64,
+    total: f64,
+    total_frames: u64,
+    base: f64,
+    span: f64,
+    stage: &str,
+    mut on_finish_request: impl FnMut(),
+) {
+    let started = std::time::Instant::now();
+    let mut current_frame = 0u64;
+    let mut speed = String::new();
+    for line in BufReader::new(out).lines().map_while(Result::ok) {
+        if state.cancelled.load(Ordering::SeqCst) {
+            break;
+        }
+        if state.finish_requested.load(Ordering::SeqCst) {
+            on_finish_request();
+        }
+        if let Some(v) = line.strip_prefix("frame=") {
+            current_frame = v.trim().parse().unwrap_or(current_frame);
+        } else if let Some(v) = line.strip_prefix("speed=") {
+            speed = v.trim().to_string();
+        } else if let Some(v) = line.strip_prefix("out_time_us=") {
+            let secs = v.trim().parse::<f64>().unwrap_or(0.0) / 1_000_000.0;
+            current_frame = current_frame.max((secs * fps).floor().max(0.0) as u64);
+            let pct = (secs / total.max(0.05)).clamp(0.0, 1.0);
+            let elapsed = started.elapsed().as_secs_f64();
+            let eta = if pct > 0.02 { elapsed / pct - elapsed } else { 0.0 };
+            let _ = app.emit(
+                "export-progress",
+                ProgressEvent {
+                    percent: base + pct * span,
+                    current_seconds: secs,
+                    total_seconds: total,
+                    current_frame: current_frame.min(total_frames),
+                    total_frames,
+                    eta_seconds: eta.max(0.0),
+                    speed: speed.clone(),
+                    stage: stage.to_string(),
+                },
+            );
+        }
+    }
+}
+
+fn collect_stderr(err: Option<std::process::ChildStderr>) -> std::thread::JoinHandle<String> {
+    std::thread::spawn(move || {
+        let mut text = String::new();
+        if let Some(err) = err {
+            for line in BufReader::new(err).lines().map_while(Result::ok) {
+                text.push_str(&line);
+                text.push('\n');
+                if text.len() > 16_000 {
+                    text.drain(..8_000);
+                }
+            }
+        }
+        text
+    })
+}
+
+fn run_rife_export(
+    app: &AppHandle,
+    state: &ExportState,
+    p: &ExportPayload,
+    total: f64,
+    build_dir: &std::path::Path,
+    progress_base: f64,
+    progress_span: f64,
+) -> Result<(), String> {
+    let mb = p.motion_blur.as_ref().ok_or("missing RIFE settings")?;
+    if mb.amount <= 0.0 {
+        let mut plain = p.clone();
+        plain.motion_blur = None;
+        return run_export_inner(
+            app,
+            state,
+            &plain,
+            total,
+            build_dir,
+            progress_base,
+            progress_span,
+            "encoding video",
+        );
+    }
+
+    // Size-limited exports (discord preset / custom size cap) get a third
+    // stage: the blurred stream lands in a near-lossless mezzanine first and
+    // is then encoded with two-pass x264. Single-pass ABR straight off the
+    // pipe routinely overshoots the target on short clips, which is what
+    // pushed "9 MB" discord exports past the 10 MB upload limit.
+    let size_targeted = p.preset == "discord" || p.target_size_bytes > 0.0;
+    let (stage1_end, stage2_end) = if size_targeted { (0.20, 0.75) } else { (0.25, 1.0) };
+
+    // Stage 1 composes the editor timeline into a high-quality temporary file.
+    // Stage 2 sends that file through bundled VapourSynth RIFE on the GPU.
+    // Text stays OUT of stage 1: RIFE warps the edges of static overlays with
+    // scene motion, so text is burned in after the blur (stage 2), where it
+    // stays crisp and matches the editor preview.
+    let intermediate = build_dir.join("rife-timeline.mkv");
+    let mut timeline = p.clone();
+    timeline.clips.retain(|c| c.kind != "text");
+    timeline.motion_blur = None;
+    timeline.out_path = intermediate.to_string_lossy().into_owned();
+    timeline.preset = "rife-intermediate".into();
+    timeline.target_size_bytes = 0.0;
+    timeline.crf = Some(12.0);
+    if timeline.clips.is_empty() {
+        return Err("nothing to export besides text; disable motion blur".into());
+    }
+    run_export_inner(
+        app,
+        state,
+        &timeline,
+        total,
+        build_dir,
+        progress_base,
+        progress_span * stage1_end,
+        "compositing timeline",
+    )?;
+    if state.cancelled.load(Ordering::SeqCst) {
+        return Err("cancelled".into());
+    }
+
+    let stage1_stopped = state.finish_requested.swap(false, Ordering::SeqCst);
+    let render_total = if stage1_stopped {
+        probe_duration(&intermediate)?.clamp(0.05, total)
+    } else {
+        total
+    };
+
+    let vs_method = if mb.method == "balanced" { "mvtools" } else { "rife" };
+    let vspipe = runtime_resource(app, "vapoursynth/VSPipe.exe")?;
+    let script = runtime_resource(app, "rife_blur.vpy")?;
+    let model = runtime_resource(app, "rife-models/rife-v4.26_ensembleFalse")?;
+    let mut required = vec![&vspipe, &script];
+    if vs_method == "rife" {
+        required.push(&model);
+    }
+    for path in required {
+        if !path.exists() {
+            return Err(format!("bundled motion blur runtime is missing: {}", path.display()));
+        }
+    }
+
+    let auto_threads = detect_gpu_threads();
+    let gpu_threads = if mb.gpu_threads == 0 {
+        auto_threads
+    } else {
+        mb.gpu_threads.clamp(1, 2)
+    };
+    let stage2_label = if vs_method == "mvtools" {
+        "rendering motion blur (motion compensation)".to_string()
+    } else if gpu_threads > auto_threads {
+        format!(
+            "rendering motion blur (RIFE, {gpu_threads} gpu threads — more than this GPU's VRAM supports, expect a very slow render; use auto)"
+        )
+    } else {
+        format!(
+            "rendering motion blur (RIFE, {gpu_threads} gpu thread{})",
+            if gpu_threads == 1 { "" } else { "s" }
+        )
+    };
+
+    let mut vspipe_cmd = std::process::Command::new(&vspipe);
+    #[cfg(windows)]
+    vspipe_cmd.creation_flags(CREATE_NO_WINDOW);
+    vspipe_cmd.args([
+        "-c",
+        "y4m",
+        "-a",
+        &format!("input_path={}", intermediate.display()),
+        "-a",
+        &format!("model_path={}", model.display()),
+        "-a",
+        &format!("interpolated_fps={}", rife_interp_fps(mb, p.fps).round()),
+        "-a",
+        &format!("output_fps={}", p.fps.round()),
+        "-a",
+        &format!("weights={}", rife_weights(mb, p.fps)),
+        "-a",
+        &format!("method={vs_method}"),
+        "-a",
+        &format!("gpu_thread={gpu_threads}"),
+        "-a",
+        // uhd mode halves the optical-flow resolution; only worth the
+        // quality trade above 1080p, where full-res flow gets very slow
+        &format!("uhd={}", u32::from(p.height > 1080)),
+        script.to_string_lossy().as_ref(),
+        "-",
+    ]);
+    vspipe_cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).stdin(Stdio::null());
+    let mut vspipe_child = vspipe_cmd
+        .spawn()
+        .map_err(|e| format!("failed to start bundled RIFE runtime: {e}"))?;
+    state.worker_pid.store(vspipe_child.id(), Ordering::SeqCst);
+    let vspipe_out = vspipe_child
+        .stdout
+        .take()
+        .ok_or("bundled RIFE runtime has no output pipe")?;
+    let vspipe_err_thread = collect_stderr(vspipe_child.stderr.take());
+
+    let mezzanine = build_dir.join("rife-blurred.mkv");
+    let mut enc = encode_settings(p, render_total);
+    enc.preset = "veryfast";
+    let total_frames = (render_total * p.fps).ceil() as u64;
+
+    // stage-2 finishing graph: mask-merge sharp pixels back in, apply the
+    // color controls, then burn in text — all after the blur, like the preview
+    let mask_path = write_mask_png(mb, build_dir)?;
+    let eq = eq_filter(mb);
+    let text_present = p.clips.iter().any(|c| c.kind == "text" && c.text.is_some());
+    let use_graph = mask_path.is_some() || eq.is_some() || text_present;
+
+    let mut cmd = ffmpeg::command("ffmpeg")?;
+    cmd.current_dir(build_dir);
+    cmd.args(["-y", "-hide_banner", "-nostats", "-i", "pipe:0", "-i"]);
+    cmd.arg(&intermediate);
+    if let Some(mask) = &mask_path {
+        cmd.args(["-loop", "1", "-t", &f(render_total), "-i"]);
+        cmd.arg(mask);
+    }
+    if use_graph {
+        let (w, h, fps) = (p.width, p.height, p.fps);
+        let mut g2 = String::new();
+        let mut prev2 = String::from("vrife");
+        writeln!(g2, "[0:v]null[vrife];").unwrap();
+        if mask_path.is_some() {
+            // input 1 (the pre-RIFE intermediate) provides the sharp pixels
+            writeln!(g2, "[1:v]format=yuva420p[vsharp];").unwrap();
+            writeln!(g2, "[2:v]fps={fps},scale={w}:{h},format=gray[vmask];").unwrap();
+            writeln!(g2, "[vsharp][vmask]alphamerge[vsharpa];").unwrap();
+            writeln!(g2, "[vrife][vsharpa]overlay=0:0:shortest=1[vmasked];").unwrap();
+            prev2 = "vmasked".to_string();
+        }
+        if let Some(eq) = &eq {
+            writeln!(g2, "[{prev2}]{eq}[veq];").unwrap();
+            prev2 = "veq".to_string();
+        }
+        append_text_overlays(&mut g2, &mut prev2, p, render_total, fps, build_dir)?;
+        writeln!(g2, "[{prev2}]format=yuv420p[vout];").unwrap();
+        std::fs::write(build_dir.join("filter-stage2.txt"), &g2)
+            .map_err(|e| format!("filter file: {e}"))?;
+        cmd.args(["-filter_complex_script", "filter-stage2.txt"]);
+        cmd.args(["-map", "[vout]", "-map", "1:a?"]);
+    } else {
+        cmd.args(["-map", "0:v", "-map", "1:a?"]);
+    }
+    if size_targeted {
+        cmd.args(["-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "ultrafast", "-crf", "12"]);
+        cmd.args(["-c:a", "copy"]);
+    } else {
+        cmd.args(["-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", enc.preset]);
+        if let Some(crf) = enc.crf {
+            cmd.args(["-crf", &format!("{crf}")]);
+        } else if let Some(b) = enc.video_bitrate {
+            cmd.args(["-b:v", &b.to_string(), "-maxrate", &b.to_string(), "-bufsize", &(b * 2).to_string()]);
+        }
+        cmd.args(["-c:a", "aac", "-b:a", enc.audio_bitrate, "-movflags", "+faststart"]);
+    }
+    // audio (input 1) is a complete file even when the RIFE pipe is stopped
+    // early — without -shortest ffmpeg keeps muxing audio to its end and the
+    // player would hold the last video frame for the remainder
+    cmd.args(["-shortest", "-progress", "pipe:1"]);
+    if size_targeted {
+        cmd.arg(&mezzanine);
+    } else {
+        cmd.arg(&p.out_path);
+    }
+    cmd.stdin(Stdio::from(vspipe_out)).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = cmd.spawn().map_err(|e| format!("failed to start final RIFE encode: {e}"))?;
+    state.child_pid.store(child.id(), Ordering::SeqCst);
+    let stderr_thread = collect_stderr(child.stderr.take());
+
+    // the runtime takes a while to load (model upload / source indexing)
+    // before the first frame comes out — tell the UI why
+    emit_stage(
+        app,
+        progress_base + progress_span * stage1_end,
+        render_total,
+        total_frames,
+        if vs_method == "mvtools" {
+            "starting motion blur runtime"
+        } else {
+            "starting RIFE motion blur (loading model)"
+        },
+    );
+
+    if let Some(out) = child.stdout.take() {
+        pump_progress(
+            app,
+            state,
+            out,
+            p.fps,
+            render_total,
+            total_frames,
+            progress_base + progress_span * stage1_end,
+            progress_span * (stage2_end - stage1_end),
+            &stage2_label,
+            || {
+                let _ = vspipe_child.kill();
+            },
+        );
+    }
+
+    if state.cancelled.load(Ordering::SeqCst) {
+        let _ = child.kill();
+        let _ = vspipe_child.kill();
+        let _ = child.wait();
+        let _ = vspipe_child.wait();
+        let _ = stderr_thread.join();
+        let _ = vspipe_err_thread.join();
+        let _ = std::fs::remove_file(&p.out_path);
+        return Err("cancelled".into());
+    }
+
+    let status = child.wait().map_err(|e| format!("RIFE encode wait failed: {e}"))?;
+    let vspipe_status = vspipe_child.wait().map_err(|e| format!("RIFE runtime wait failed: {e}"))?;
+    state.worker_pid.store(0, Ordering::SeqCst);
+    let stderr_text = stderr_thread.join().unwrap_or_default();
+    let vspipe_text = vspipe_err_thread.join().unwrap_or_default();
+    if !status.success()
+        || (!vspipe_status.success() && !state.finish_requested.load(Ordering::SeqCst))
+    {
+        let details = format!("{vspipe_text}\n{stderr_text}");
+        let tail = details.lines().rev().take(14).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n");
+        return Err(format!("RIFE motion blur export failed:\n{tail}"));
+    }
+
+    if size_targeted {
+        run_two_pass_encode(
+            app,
+            state,
+            p,
+            &mezzanine,
+            build_dir,
+            progress_base + progress_span * stage2_end,
+            progress_span * (1.0 - stage2_end),
+        )?;
+    }
+
+    if !state.finish_requested.load(Ordering::SeqCst) {
+        let _ = app.emit(
+            "export-progress",
+            ProgressEvent {
+                percent: progress_base + progress_span,
+                current_seconds: render_total,
+                total_seconds: render_total,
+                current_frame: total_frames,
+                total_frames,
+                eta_seconds: 0.0,
+                speed: String::new(),
+                stage: "done".into(),
+            },
+        );
+    }
+    Ok(())
+}
+
+/// Stage 3 for size-limited RIFE exports: two-pass x264 from the mezzanine
+/// file to the target bitrate. Two-pass hits the average within a couple of
+/// percent, so the 9 MB discord budget stays safely under the 10 MB limit.
+fn run_two_pass_encode(
+    app: &AppHandle,
+    state: &ExportState,
+    p: &ExportPayload,
+    mezzanine: &std::path::Path,
+    build_dir: &std::path::Path,
+    base: f64,
+    span: f64,
+) -> Result<(), String> {
+    let duration = probe_duration(mezzanine)?.max(0.05);
+    let enc = encode_settings(p, duration);
+    let bitrate = enc.video_bitrate.ok_or("size-limited export without a target bitrate")?;
+    let passlog = build_dir.join("x264-2pass");
+    let total_frames = (duration * p.fps).ceil() as u64;
+
+    for pass in 1..=2u32 {
+        let mut cmd = ffmpeg::command("ffmpeg")?;
+        cmd.args(["-y", "-hide_banner", "-nostats", "-i"]);
+        cmd.arg(mezzanine);
+        cmd.args(["-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "medium"]);
+        cmd.args([
+            "-b:v",
+            &bitrate.to_string(),
+            "-maxrate",
+            &(bitrate * 3 / 2).to_string(),
+            "-bufsize",
+            &(bitrate * 3).to_string(),
+        ]);
+        cmd.args(["-pass", &pass.to_string(), "-passlogfile"]);
+        cmd.arg(&passlog);
+        if pass == 1 {
+            cmd.args(["-an", "-f", "null", "-progress", "pipe:1", "NUL"]);
+        } else {
+            cmd.args(["-c:a", "aac", "-b:a", enc.audio_bitrate]);
+            cmd.args(["-movflags", "+faststart", "-progress", "pipe:1"]);
+            cmd.arg(&p.out_path);
+        }
+        cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).stdin(Stdio::null());
+        let mut child = cmd.spawn().map_err(|e| format!("failed to start size-targeted encode: {e}"))?;
+        state.child_pid.store(child.id(), Ordering::SeqCst);
+        let stderr_thread = collect_stderr(child.stderr.take());
+
+        if let Some(out) = child.stdout.take() {
+            let pass_base = base + span * if pass == 1 { 0.0 } else { 0.5 };
+            let stage = if pass == 1 {
+                "fitting size limit (analysis pass 1/2)"
+            } else {
+                "fitting size limit (final encode 2/2)"
+            };
+            emit_stage(app, pass_base, duration, total_frames, stage);
+            pump_progress(
+                app, state, out, p.fps, duration, total_frames, pass_base, span * 0.5, stage,
+                || {},
+            );
+        }
+
+        if state.cancelled.load(Ordering::SeqCst) {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = stderr_thread.join();
+            let _ = std::fs::remove_file(&p.out_path);
+            return Err("cancelled".into());
+        }
+        let status = child.wait().map_err(|e| format!("size-targeted encode wait failed: {e}"))?;
+        let stderr_text = stderr_thread.join().unwrap_or_default();
+        if !status.success() {
+            let tail = stderr_text
+                .lines()
+                .rev()
+                .take(10)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect::<Vec<_>>()
+                .join("\n");
+            return Err(format!("size-targeted encode failed:\n{tail}"));
+        }
+    }
     Ok(())
 }

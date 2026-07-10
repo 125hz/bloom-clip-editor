@@ -1,6 +1,6 @@
 [package]
 name = "bloom-clip-editor"
-version = "2.1.0"
+version = "2.5.0"
 description = "A simple clip editor to cut and merge videos quickly"
 authors = ["125hz"]
 edition = "2021"
@@ -14,6 +14,10 @@ tauri-plugin-dialog = "2"
 tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+base64 = "0.22"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.61.3", features = ["Win32_Foundation", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_System_DataExchange", "Win32_System_Memory", "Win32_System_Ole", "Win32_UI_Shell"] }
 
 [profile.release]
 opt-level = "s"

@@ -11,6 +11,9 @@ use tauri::Manager;
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 
+#[cfg(windows)]
+use std::os::windows::ffi::OsStrExt;
+
 // -------------------- probe --------------------
 
 #[derive(Serialize)]
@@ -186,6 +189,7 @@ async fn export_project(
 fn cancel_export(state: tauri::State<export::ExportState>) {
     state.cancelled.store(true, Ordering::SeqCst);
     let pid = state.child_pid.load(Ordering::SeqCst);
+    let worker_pid = state.worker_pid.load(Ordering::SeqCst);
     if pid != 0 {
         #[cfg(windows)]
         {
@@ -193,8 +197,104 @@ fn cancel_export(state: tauri::State<export::ExportState>) {
             kill.args(["/F", "/T", "/PID", &pid.to_string()]);
             kill.creation_flags(0x0800_0000);
             let _ = kill.status();
+            if worker_pid != 0 {
+                let mut kill_worker = std::process::Command::new("taskkill");
+                kill_worker.args(["/F", "/PID", &worker_pid.to_string()]);
+                kill_worker.creation_flags(0x0800_0000);
+                let _ = kill_worker.status();
+            }
         }
     }
+}
+
+#[tauri::command]
+fn finish_export(state: tauri::State<export::ExportState>) {
+    state.finish_requested.store(true, Ordering::SeqCst);
+    let worker_pid = state.worker_pid.load(Ordering::SeqCst);
+    #[cfg(windows)]
+    if worker_pid != 0 {
+        let mut kill = std::process::Command::new("taskkill");
+        kill.args(["/F", "/PID", &worker_pid.to_string()]);
+        kill.creation_flags(0x0800_0000);
+        let _ = kill.status();
+    }
+}
+
+// -------------------- clipboard --------------------
+
+/// Place a file on the Windows clipboard as CF_HDROP, so standard paste
+/// targets receive the video file rather than a text path.
+#[cfg(windows)]
+#[tauri::command]
+fn copy_file_to_clipboard(path: String) -> Result<(), String> {
+    use std::ffi::OsStr;
+    use std::mem::size_of;
+    use std::ptr;
+    use windows::core::BOOL;
+    use windows::Win32::Foundation::{GlobalFree, HANDLE};
+    use windows::Win32::System::DataExchange::{CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData};
+    use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
+    use windows::Win32::System::Ole::CF_HDROP;
+    use windows::Win32::UI::Shell::DROPFILES;
+
+    if !std::path::Path::new(&path).is_file() {
+        return Err("exported video file no longer exists".into());
+    }
+
+    // DROPFILES is followed by one or more NUL-terminated UTF-16 paths and
+    // a final NUL. A single file therefore needs two trailing zeroes.
+    let wide: Vec<u16> = OsStr::new(&path)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .chain(std::iter::once(0))
+        .collect();
+    let bytes = size_of::<DROPFILES>() + wide.len() * size_of::<u16>();
+
+    unsafe {
+        let hmem = GlobalAlloc(GMEM_MOVEABLE, bytes).map_err(|e| format!("clipboard allocation failed: {e}"))?;
+        let data = GlobalLock(hmem) as *mut u8;
+        if data.is_null() {
+            let _ = GlobalFree(Some(hmem));
+            return Err("clipboard allocation could not be locked".into());
+        }
+        ptr::write_unaligned(
+            data.cast::<DROPFILES>(),
+            DROPFILES {
+                pFiles: size_of::<DROPFILES>() as u32,
+                fWide: BOOL(1),
+                ..Default::default()
+            },
+        );
+        ptr::copy_nonoverlapping(
+            wide.as_ptr(),
+            data.add(size_of::<DROPFILES>()).cast::<u16>(),
+            wide.len(),
+        );
+        let _ = GlobalUnlock(hmem);
+
+        OpenClipboard(None).map_err(|e| {
+            let _ = GlobalFree(Some(hmem));
+            format!("could not open clipboard: {e}")
+        })?;
+        if let Err(e) = EmptyClipboard() {
+            let _ = CloseClipboard();
+            let _ = GlobalFree(Some(hmem));
+            return Err(format!("could not clear clipboard: {e}"));
+        }
+        if let Err(e) = SetClipboardData(CF_HDROP.0 as u32, Some(HANDLE(hmem.0))) {
+            let _ = CloseClipboard();
+            let _ = GlobalFree(Some(hmem));
+            return Err(format!("could not set clipboard data: {e}"));
+        }
+        let _ = CloseClipboard();
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+#[tauri::command]
+fn copy_file_to_clipboard(_path: String) -> Result<(), String> {
+    Err("copying exported files to the clipboard is currently supported on Windows only".into())
 }
 
 // -------------------- project save / load --------------------
@@ -210,6 +310,30 @@ fn load_project(path: String) -> Result<String, String> {
 }
 
 // -------------------- status --------------------
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GpuInfo {
+    name: String,
+    dedicated_bytes: u64,
+    auto_threads: u32,
+}
+
+#[tauri::command]
+fn gpu_info() -> GpuInfo {
+    match export::gpu_adapter_info() {
+        Some((name, vram)) => GpuInfo {
+            name,
+            dedicated_bytes: vram,
+            auto_threads: export::detect_gpu_threads(),
+        },
+        None => GpuInfo {
+            name: "unknown GPU".into(),
+            dedicated_bytes: 0,
+            auto_threads: 1,
+        },
+    }
+}
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -252,9 +376,12 @@ fn main() {
             generate_thumbnail,
             export_project,
             cancel_export,
+            finish_export,
+            copy_file_to_clipboard,
             save_project,
             load_project,
-            tool_status
+            tool_status,
+            gpu_info
         ])
         .run(tauri::generate_context!())
         .expect("error while running bloom editor");

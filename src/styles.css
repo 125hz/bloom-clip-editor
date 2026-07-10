@@ -510,7 +510,8 @@ input[type=number]::-webkit-inner-spin-button { -webkit-appearance: none; }
   border-left: 1px dashed var(--dim2);
   border-right: 1px dashed var(--dim2);
   pointer-events: none;
-  z-index: 1;
+  /* above selected clips (10), below a clip being dragged (20) */
+  z-index: 15;
 }
 
 .loop-handle {
@@ -628,6 +629,69 @@ input[type=number]::-webkit-inner-spin-button { -webkit-appearance: none; }
 .preset.disabled { opacity: 0.35; pointer-events: none; }
 .note { font-size: 10px; }
 
+/* blur color controls: sliders on the left, live preview on the right */
+.blur-color-row {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+.blur-color-sliders {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.blur-color-sliders input { width: 100%; }
+.blur-color-preview {
+  flex: 1.2;
+  min-width: 0;
+  position: relative;
+  border: 1px solid var(--line);
+  background: #000;
+  overflow: hidden;
+  align-self: center;
+}
+.blur-color-preview canvas {
+  display: block;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  image-rendering: auto;
+  filter: url(#mb-color-filter);
+}
+.blur-preview-filter { position: absolute; width: 0; height: 0; pointer-events: none; }
+.blur-color-preview span {
+  position: absolute;
+  right: 5px;
+  bottom: 4px;
+  padding: 1px 4px;
+  color: var(--fg);
+  background: rgba(0, 0, 0, 0.7);
+  font-size: 9px;
+  letter-spacing: 0.5px;
+  pointer-events: none;
+}
+
+/* blur mask editor */
+.mask-modal {
+  width: min(80vw, 1100px);
+  max-width: min(80vw, 1100px);
+}
+#mask-canvas {
+  display: block;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  border: 1px solid var(--line);
+  background: #000;
+  cursor: crosshair;
+  touch-action: none;
+}
+.mask-tools { align-items: end; }
+.tbtn.active { border-color: var(--fg); color: var(--fg); }
+.row-actions { display: flex; align-items: center; gap: 8px; }
+.mask-status { font-style: normal; color: var(--dim2); }
+.mask-status.on { color: var(--fg); }
+
 /* export progress */
 #export-preview-canvas {
   width: 100%;
@@ -650,6 +714,16 @@ input[type=number]::-webkit-inner-spin-button { -webkit-appearance: none; }
   justify-content: space-between;
   color: var(--dim2);
   font-size: 11px;
+}
+.export-actions { display: flex; gap: 8px; }
+.export-actions .tbtn { flex: 1; }
+.export-result-message {
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  padding: 8px 0;
+  color: var(--fg);
+  font-size: 11px;
+  line-height: 1.5;
 }
 
 .shortcut-list {
