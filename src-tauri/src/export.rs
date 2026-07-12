@@ -1277,7 +1277,21 @@ fn runtime_resource(app: &AppHandle, name: &str) -> Result<std::path::PathBuf, S
     app.path()
         .resource_dir()
         .map_err(|e| format!("motion blur runtime path: {e}"))
-        .map(|dir| dir.join(name))
+        .map(|dir| strip_verbatim(dir.join(name)))
+}
+
+/// Tauri's resource_dir returns a `\\?\` extended-length path in installed
+/// builds. The RIFE plugin joins `model_path + "/flownet.param"`, and Win32
+/// skips slash normalization on verbatim paths, so the model fails to load.
+fn strip_verbatim(path: std::path::PathBuf) -> std::path::PathBuf {
+    let s = path.to_string_lossy();
+    if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+        std::path::PathBuf::from(format!(r"\\{rest}"))
+    } else if let Some(rest) = s.strip_prefix(r"\\?\") {
+        std::path::PathBuf::from(rest.to_string())
+    } else {
+        path
+    }
 }
 
 fn probe_duration(path: &std::path::Path) -> Result<f64, String> {

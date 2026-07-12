@@ -11,8 +11,22 @@ from pathlib import Path
 import vapoursynth as vs
 
 core = vs.core
+
+
+def _plain_windows_path(p):
+    # The host may hand us a \\?\ extended-length path. ncnn's model loader
+    # joins "/flownet.param" onto it with a forward slash, and Win32 skips
+    # slash normalization on verbatim paths, so the model fails to load.
+    s = str(p)
+    if s.startswith("\\\\?\\UNC\\"):
+        return Path("\\\\" + s[8:])
+    if s.startswith("\\\\?\\"):
+        return Path(s[4:])
+    return p
+
+
 input_path = Path(vars()["input_path"])
-model_path = Path(vars()["model_path"])
+model_path = _plain_windows_path(Path(vars()["model_path"]))
 interpolated_fps = int(vars()["interpolated_fps"])
 output_fps = int(vars()["output_fps"])
 method = str(vars().get("method", "rife"))
